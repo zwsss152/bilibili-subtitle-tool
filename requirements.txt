@@ -1,0 +1,5 @@
+# 仅「无字幕 → 本地语音识别」功能需要以下依赖。
+# CC 字幕提取本身只用 Python 标准库（tkinter + urllib），无需安装任何包。
+yt-dlp
+faster-whisper
+imageio-ffmpeg
