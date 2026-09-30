@@ -18,3 +18,11 @@ asr_cache/
 *.part
 *.log
 .DS_Store
+文字稿/
+
+# ---- UI 验证截图（本地调试产物，不入库）----
+ui_preview.png
+
+# ---- 图标生成中间产物（仅保留最终 .ico）----
+assets/icon_preview.png
+assets/Modern_flat_app_icon_for_a_vid_*.png

@@ -3,3 +3,4 @@
 yt-dlp
 faster-whisper
 imageio-ffmpeg
+opencc-python-reimplemented  # 批量转写：繁体 → 简体
