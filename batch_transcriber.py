@@ -1,14 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-批量视频转文字稿工具（B 站 / 抖音 · 本地版）
-============================================
-用途：写文章收集资料。粘贴视频链接 → 自动入队 → 自动逐条转写 →
+批量视频/播客转文字稿工具（B 站 / 抖音 / 机核 · 本地版）
+==========================================================
+用途：写文章收集资料。粘贴链接 → 自动入队 → 自动逐条转写 →
 文字稿自动存入「文字稿/<主题>/」文件夹，全程无确认、无弹窗。
 
 特性：
   1. 队列式批量处理，随时粘贴随时加入（支持一次粘贴多条链接）
   2. 主题文件夹管理：按主题名自动建目录，稿子自动归档
-  3. 全自动：B 站优先 CC 字幕（秒出），无字幕自动本地语音识别，无人工干预
+  3. 全自动：B 站优先 CC 字幕（秒出），无字幕自动本地语音识别，无人工干预；
+     机核播客直接取官方音频直链转写，无需额外解析
   4. 提速：批处理推理 + 贪心解码 + 下载/识别双线程流水线
   5. 输出规范：简体中文、带标点、按段落组织、每段带起始时间戳
 
@@ -26,6 +27,8 @@ import sys
 import threading
 import time
 import tkinter as tk
+import urllib.error
+import urllib.request
 from tkinter import ttk, scrolledtext
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,7 +41,6 @@ OUTPUT_ROOT = os.path.join(BASE_DIR, "文字稿")
 AUDIO_CACHE = core.ASR_CACHE_DIR
 APP_TITLE = "视频列表 · 批量视频转文字稿"
 APP_ICON = os.path.join(BASE_DIR, "assets", "视频列表.ico")
-
 # ---------------- 设计令牌（Devtool 工作台模式 · 浅色） ----------------
 C = {
     "bg": "#F4F5F9",          # 应用底色
@@ -58,6 +60,84 @@ C = {
 FONT = "Microsoft YaHei UI"
 
 DOUYIN_RE = re.compile(r"https?://[^\s，。\"'）)】]*douyin\.com[^\s，。\"'）)】]*")
+GCORES_RE = re.compile(r"https?://(?:www\.)?gcores\.com/radios/(\d+)", re.IGNORECASE)
+
+
+# ----------------------------------------------------------------------
+# 机核网（gcores.com）播客支持
+# ----------------------------------------------------------------------
+# 机核页面是 React 动态渲染，页面 HTML 里拿不到音频；但它自己的接口是开放的：
+#   GET https://www.gcores.com/gapi/v1/radios/{id}?include=media
+#     → data.attributes.title / duration
+#     → included[].attributes.audio = "xxxx.mp3"（音频文件名）
+#  音频真实地址 = https://alioss.gcores.com/uploads/audio/{audio}
+#    （该规律来自其前端 JS：`${alioss_url}/uploads/audio/${e}`，alioss_url = https://alioss.gcores.com）
+#  该直链为阿里云 OSS 公共读，无需鉴权、支持 Range 断点续传。
+GCORES_OSS = "https://alioss.gcores.com/uploads/audio/"
+
+
+def fetch_gcores_radio(radio_id):
+    """读取机核电台节目标题与音频直链。"""
+    api = f"https://www.gcores.com/gapi/v1/radios/{radio_id}?include=media"
+    try:
+        data = core.http_get_json(api)
+    except Exception as e:
+        raise RuntimeError(f"读取机核节目信息失败：{e}")
+    attrs = (data.get("data") or {}).get("attributes") or {}
+    title = (attrs.get("title") or "").strip() or f"机核电台_{radio_id}"
+    audio = ""
+    for inc in data.get("included") or []:
+        a = (inc.get("attributes") or {}).get("audio")
+        if a:
+            audio = a
+            break
+    if not audio:
+        raise RuntimeError("未找到音频文件（该期可能不是标准播客节目）。")
+    if not re.match(r"^https?://", audio):
+        audio = GCORES_OSS + audio.lstrip("/")
+    return {
+        "title": title,
+        "duration": int(attrs.get("duration") or 0),
+        "audio_url": audio,
+    }
+
+
+def download_direct_audio(url, dest_path, progress_cb):
+    """流式下载音频直链（支持 Range 断点续传 + 进度回调）。"""
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    tmp = dest_path + ".part"
+    done = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+    headers = dict(core.UA_HEADERS)
+    if done:
+        headers["Range"] = f"bytes={done}-"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        resp = urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"音频下载失败：HTTP {e.code}")
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"音频下载失败：{e.reason}")
+    with resp:
+        if done and resp.status != 206:  # 服务端不支持断点续传 → 重下
+            done = 0
+        total = int(resp.headers.get("Content-Length") or 0) + done
+        with open(tmp, "ab" if done else "wb") as f:
+            while True:
+                chunk = resp.read(1 << 18)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if total:
+                    pct = done * 100 // total
+                    progress_cb(
+                        f"下载音频中…… {done >> 20}MB / {total >> 20}MB（{pct}%）", pct
+                    )
+    if os.path.getsize(tmp) < 10000:
+        raise RuntimeError("音频文件异常（体积过小），可能下载被中断。")
+    os.replace(tmp, dest_path)
+    return dest_path
+
 
 
 # ----------------------------------------------------------------------
@@ -78,8 +158,28 @@ def to_simplified(text):
 _CJK = r"\u4e00-\u9fff"
 
 
+_LAUGH = "哈呵嘿嘻嚯噢啊呀吖哇哦嗯哎嘿"
+
+
+def collapse_repeats(text):
+    """清理 whisper 的重复幻觉。
+
+    长音频（尤其播客）里 whisper 偶尔会卡在解码循环里「刷屏」：
+      「……这座被称作岳阳观测站的七层废墟处处处处处处处处……」
+    两档处理：
+      1) 同一个字连续 ≥5 次 → 收敛（笑声/语气词保留 3 个，其余收敛为 1 个）
+      2) 同一短语（2~10 字）连续 ≥4 次 → 收敛为 1 次（如「好的好的好的好的」）
+    阈值取偏保守，避免误伤「非常非常」这类正常口语强调。
+    """
+    text = re.sub(r"(.)\1{4,}",
+                  lambda m: m.group(1) * (3 if m.group(1) in _LAUGH else 1),
+                  text)
+    text = re.sub(r"(.{2,10}?)\1{3,}", r"\1", text)
+    return text
+
+
 def normalize_text(text):
-    """简体化 + 中文语境标点规范化（whisper 常输出半角逗号/句号）。"""
+    """简体化 + 中文语境标点规范化（whisper 常输出半角逗号/句号）+ 去重复幻觉。"""
     t = to_simplified(text)
     # 紧邻中文的半角标点 → 全角（不影响英文句子和数字小数点）
     t = re.sub(rf"(?<=[{_CJK}])\s*,\s*", "，", t)
@@ -89,6 +189,7 @@ def normalize_text(text):
     t = re.sub(rf"(?<=[{_CJK}]);", "；", t)
     t = re.sub(rf"(?<=[{_CJK}]):", "：", t)
     t = re.sub(rf"(?<=[{_CJK}])\.\s*", "。", t)
+    t = collapse_repeats(t)
     return t.strip()
 
 
@@ -225,8 +326,8 @@ def transcribe_fast(audio_path, model_size, progress_cb, beam_size=3):
 class Job:
     def __init__(self, jid, kind, ref, raw):
         self.jid = jid
-        self.kind = kind            # 'bilibili' | 'douyin'
-        self.ref = ref              # bilibili: (id_type, id_value)；douyin: 完整 URL
+        self.kind = kind            # 'bilibili' | 'douyin' | 'gcores'
+        self.ref = ref              # bilibili: (id_type, id_value)；douyin: 完整 URL；gcores: 电台 id
         self.raw = raw
         self.title = raw[:42]
         self.status = "排队中"      # 排队中/解析中/下载中/等待识别/识别中/完成/失败
@@ -268,8 +369,11 @@ class Pipeline:
             if not token:
                 continue
             m = DOUYIN_RE.search(token)
+            g = GCORES_RE.search(token)
             if m:
                 kind, ref, raw = "douyin", m.group(0), m.group(0)
+            elif g:
+                kind, ref, raw = "gcores", g.group(1), g.group(0)
             else:
                 try:
                     kind, ref = "bilibili", core.parse_video_id(token)
@@ -332,8 +436,9 @@ class Pipeline:
                           else os.path.dirname(path))
 
     def _page_failed(self, job, page_no, err):
-        job.error = f"P{page_no}: {err}"
-        self.log(f"[#{job.jid}] P{page_no} 失败：{err}")
+        label = f"P{page_no}" if job.pages_total > 1 else "任务"
+        job.error = f"{label}: {err}"
+        self.log(f"[#{job.jid}] {label} 失败：{err}")
         # 单页失败不阻塞后续页；全部结束后若零产出则标失败
         job.pages_done += 1
         if job.pages_done >= max(job.pages_total, 1):
@@ -362,6 +467,8 @@ class Pipeline:
             try:
                 if job.kind == "douyin":
                     self._handle_douyin(job)
+                elif job.kind == "gcores":
+                    self._handle_gcores(job)
                 else:
                     self._handle_bilibili(job)
             except Exception as e:
@@ -439,7 +546,43 @@ class Pipeline:
                 raise last_err
         job.status = "等待识别"
         job.detail = f"P{page_no} 排队识别"
-        self.asr_queue.put((job, page_no, page_title, url, audio))
+        self.asr_queue.put((job, page_no, page_title, url, audio, False))
+
+    def _handle_gcores(self, job):
+        """机核播客：接口取音频直链 → 直接流式下载（mp3）→ 交给识别线程。
+
+        与 B 站/抖音不同，机核音频是 OSS 公共直链，不需要 yt-dlp 解析，
+        也不需要转码成 m4a（faster-whisper 可直接解码 mp3），少一道工序。
+        """
+        radio_id = job.ref
+        url = f"https://www.gcores.com/radios/{radio_id}"
+        job.detail = "读取节目信息"
+        info = fetch_gcores_radio(radio_id)
+        job.title = info["title"]
+        job.pages_total = 1
+        # 文件名只由电台 id 决定 → 天然可缓存，重跑同一期无需重新下载
+        audio = os.path.join(AUDIO_CACHE, f"gc_{radio_id}.mp3")
+        if os.path.exists(audio) and os.path.getsize(audio) > 10000:
+            self._prog(job, 100, "使用本地已缓存音频")
+        else:
+            job.status = "下载中"
+            last_err = None
+            for attempt in range(2):
+                try:
+                    download_direct_audio(
+                        info["audio_url"], audio,
+                        lambda m, pct=None: self._prog(job, pct, m),
+                    )
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+                    time.sleep(5)  # 断点续传已保留，退一步再试
+            if last_err is not None:
+                raise last_err
+        job.status = "等待识别"
+        job.detail = "排队识别"
+        self.asr_queue.put((job, 1, job.title, url, audio, True))
 
     def _handle_douyin(self, job):
         url = job.ref
@@ -465,7 +608,7 @@ class Pipeline:
             raise last_err
         job.status = "等待识别"
         job.detail = "排队识别"
-        self.asr_queue.put((job, 1, title, url, audio))
+        self.asr_queue.put((job, 1, title, url, audio, False))
 
     # ---------------- 识别线程 ----------------
     def _asr_loop(self):
@@ -478,29 +621,31 @@ class Pipeline:
                 self.asr_queue.put(task)
                 time.sleep(0.5)
                 continue
-            job, page_no, page_title, url, audio = task
+            job, page_no, page_title, url, audio, keep = task
+            pfx = f"P{page_no} " if job.pages_total > 1 else ""
             try:
                 job.status = "识别中"
                 model_size = self.get_model_size()
                 items = transcribe_fast(
                     audio, model_size,
-                    lambda pct: self._prog(job, pct, f"P{page_no} 识别中"),
+                    lambda pct: self._prog(job, pct, f"{pfx}识别中"),
                     beam_size=self.get_beam_size(),
                 )
                 paras = build_paragraphs(items)
-                platform = "抖音" if job.kind == "douyin" else "B站"
+                platform = {"douyin": "抖音", "gcores": "机核"}.get(job.kind, "B站")
                 path = save_transcript(
                     self.get_topic_dir(), page_title, url, platform,
                     f"语音识别({model_size})", paras,
                 )
-                self._page_finished(job, path, f"P{page_no} 识别完成")
+                self._page_finished(job, path, f"{pfx}识别完成")
             except Exception as e:
                 self._page_failed(job, page_no, e)
             finally:
-                try:
-                    os.remove(audio)
-                except OSError:
-                    pass
+                if not keep:  # 机核音频保留做缓存，其余用完即删
+                    try:
+                        os.remove(audio)
+                    except OSError:
+                        pass
 
 
 # ----------------------------------------------------------------------
@@ -578,9 +723,10 @@ class BatchApp(tk.Tk):
                background=[("selected", C["select"])],
                foreground=[("selected", C["text"])])
 
-    def _card(self, title, expand=False):
+    def _card(self, title, expand=False, side="top"):
         card = ttk.Frame(self, style="Card.TFrame", padding=12)
-        card.pack(fill="both" if expand else "x", expand=expand, padx=14, pady=(0, 8))
+        card.pack(fill="both" if expand else "x", expand=expand,
+                  padx=14, pady=(0, 8), side=side)
         if title:
             ttk.Label(card, text=title, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 8))
         return card
@@ -592,11 +738,20 @@ class BatchApp(tk.Tk):
         ttk.Label(self, textvariable=self.status_var, style="Status.TLabel",
                   anchor="w").pack(fill="x", side="bottom")
 
+        # 运行日志也先占住底部（否则会被上方 expand 的工作区把高度吃光）
+        card3 = self._card("运行日志", side="bottom")
+        self.log_text = scrolledtext.ScrolledText(
+            card3, height=5, wrap="word", font=("Consolas", 9),
+            bg="#FAFBFD", fg=C["text2"], relief="solid", bd=1,
+        )
+        self.log_text.pack(fill="x")
+        self.log_text.configure(state="disabled")
+
         # 头部：产品名 + 识别选项（右置）
         header = ttk.Frame(self)
         header.pack(fill="x", padx=16, pady=(14, 10))
         ttk.Label(header, text="视频列表", style="Header.TLabel").pack(side="left")
-        ttk.Label(header, text="批量视频转文字稿 · B 站 / 抖音",
+        ttk.Label(header, text="批量视频转文字稿 · B 站 / 抖音 / 机核",
                   style="Sub.TLabel").pack(side="left", padx=(10, 0), pady=(6, 0))
         opts = ttk.Frame(header)
         opts.pack(side="right")
@@ -670,15 +825,6 @@ class BatchApp(tk.Tk):
         self.tree.tag_configure("run", foreground=C["running"])
         self.tree.tag_configure("wait", foreground=C["wait"])
 
-        # 卡片 3：运行日志
-        card3 = self._card("运行日志")
-        self.log_text = scrolledtext.ScrolledText(
-            card3, height=4, wrap="word", font=("Consolas", 9),
-            bg="#FAFBFD", fg=C["text2"], relief="solid", bd=1,
-        )
-        self.log_text.pack(fill="x")
-        self.log_text.configure(state="disabled")
-
     def _toggle_cookie(self):
         if self.show_cookie.get():
             self.cookie_entry.pack(fill="x", pady=(8, 0))
@@ -708,7 +854,9 @@ class BatchApp(tk.Tk):
             self.link_var.set("")
             self._log(f"加入队列 {added} 条" + (f"，跳过 {skipped} 条（重复或无法识别）" if skipped else ""))
         else:
-            self.status_var.set("未识别到有效链接（支持 B 站链接/BV 号/av 号/抖音分享链接）")
+            self.status_var.set(
+                "未识别到有效链接（支持 B 站链接/BV 号/av 号/抖音分享链接/机核 radios 链接）"
+            )
 
     def toggle_pause(self):
         if self.pipe.paused.is_set():
