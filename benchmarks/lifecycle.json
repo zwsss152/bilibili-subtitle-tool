@@ -1,0 +1,6 @@
+{
+  "prewarm_local_only": true,
+  "pause_prevented_dispatch": true,
+  "worker_closed": true,
+  "unfinished_restored": true
+}

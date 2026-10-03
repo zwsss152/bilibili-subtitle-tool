@@ -1,6 +1,12 @@
-# 仅「无字幕 → 本地语音识别」功能需要以下依赖。
-# CC 字幕提取本身只用 Python 标准库（tkinter + urllib），无需安装任何包。
-yt-dlp
-faster-whisper
-imageio-ffmpeg
-opencc-python-reimplemented  # 批量转写：繁体 → 简体
+# Python 3.13 / Windows x64; validated runtime versions.
+Pillow==12.3.0
+pypinyin==0.55.0
+yt-dlp==2026.8.19
+faster-whisper==1.2.1
+av==18.1.0
+ctranslate2==4.8.2
+imageio-ffmpeg==0.6.0
+opencc-python-reimplemented==0.1.7
+sherpa-onnx==1.13.8
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.27.0.42

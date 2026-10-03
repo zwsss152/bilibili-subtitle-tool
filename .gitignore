@@ -20,9 +20,36 @@ asr_cache/
 .DS_Store
 文字稿/
 
-# ---- UI 验证截图（本地调试产物，不入库）----
+# ---- 本地配置（含 B 站 Cookie，绝不能入库）----
+app_config.json
+
+# ---- UI 验证截图 / 调试临时产物（不入库）----
 ui_preview.png
+_tmp_*.png
+_tmp_*.py
+_tmp_*.txt
+_tmp_*.json
+_tmp_*.js
+_tmp_*.html
 
 # ---- 图标生成中间产物（仅保留最终 .ico）----
 assets/icon_preview.png
 assets/Modern_flat_app_icon_for_a_vid_*.png
+queue_state.json
+.instance.lock
+logs/
+recognition_profile.json
+tests/.artifacts/
+benchmarks/clips/
+benchmarks/references/
+benchmarks/integration-queue.json
+benchmarks/results/
+benchmarks/校对.html
+benchmarks/quality-review.json
+benchmarks/platform-*-queue.json
+benchmarks/qa-*.txt
+benchmarks/reported-error/*.wav
+.data/
+benchmarks/douyin-*.html
+benchmarks/reported-error/*.json
+benchmarks/integration.json

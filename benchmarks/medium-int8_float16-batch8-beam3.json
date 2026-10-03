@@ -1,0 +1,122 @@
+{
+  "profile": {
+    "model": "medium",
+    "device": "cuda",
+    "compute_type": "int8_float16",
+    "batch_size": 8,
+    "beam_size": 3
+  },
+  "model_load_seconds": 1.860330699943006,
+  "samples": [
+    {
+      "sample": "ai_1",
+      "duration": 120,
+      "elapsed_seconds": 2.4404925000853837,
+      "actual_profile": {
+        "model": "medium",
+        "device": "cuda",
+        "compute_type": "int8_float16",
+        "batch_size": 8,
+        "beam_size": 3,
+        "duration": 120.0,
+        "language": "zh",
+        "elapsed_seconds": 2.4404925000853837
+      },
+      "characters": 260,
+      "cer": null,
+      "human_reference_available": false
+    },
+    {
+      "sample": "ai_2",
+      "duration": 120,
+      "elapsed_seconds": 1.7355168999638408,
+      "actual_profile": {
+        "model": "medium",
+        "device": "cuda",
+        "compute_type": "int8_float16",
+        "batch_size": 8,
+        "beam_size": 3,
+        "duration": 120.0,
+        "language": "zh",
+        "elapsed_seconds": 1.7355168999638408
+      },
+      "characters": 374,
+      "cer": null,
+      "human_reference_available": false
+    },
+    {
+      "sample": "military_1",
+      "duration": 120,
+      "elapsed_seconds": 1.511549299932085,
+      "actual_profile": {
+        "model": "medium",
+        "device": "cuda",
+        "compute_type": "int8_float16",
+        "batch_size": 8,
+        "beam_size": 3,
+        "duration": 120.0,
+        "language": "zh",
+        "elapsed_seconds": 1.511549299932085
+      },
+      "characters": 271,
+      "cer": null,
+      "human_reference_available": false
+    },
+    {
+      "sample": "military_2",
+      "duration": 120,
+      "elapsed_seconds": 1.4602571999421343,
+      "actual_profile": {
+        "model": "medium",
+        "device": "cuda",
+        "compute_type": "int8_float16",
+        "batch_size": 8,
+        "beam_size": 3,
+        "duration": 120.0,
+        "language": "zh",
+        "elapsed_seconds": 1.4602571999421343
+      },
+      "characters": 316,
+      "cer": null,
+      "human_reference_available": false
+    },
+    {
+      "sample": "interview_1",
+      "duration": 120,
+      "elapsed_seconds": 1.7488600000506267,
+      "actual_profile": {
+        "model": "medium",
+        "device": "cuda",
+        "compute_type": "int8_float16",
+        "batch_size": 8,
+        "beam_size": 3,
+        "duration": 119.99975,
+        "language": "zh",
+        "elapsed_seconds": 1.7488600000506267
+      },
+      "characters": 201,
+      "cer": null,
+      "human_reference_available": false
+    },
+    {
+      "sample": "interview_2",
+      "duration": 120,
+      "elapsed_seconds": 1.7427153999451548,
+      "actual_profile": {
+        "model": "medium",
+        "device": "cuda",
+        "compute_type": "int8_float16",
+        "batch_size": 8,
+        "beam_size": 3,
+        "duration": 119.99975,
+        "language": "zh",
+        "elapsed_seconds": 1.7427153999451548
+      },
+      "characters": 335,
+      "cer": null,
+      "human_reference_available": false
+    }
+  ],
+  "peak_device_vram_mib": 3369,
+  "quality_verified": false
+}

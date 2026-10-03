@@ -1,0 +1,50 @@
+[
+  {
+    "id": "ai_1",
+    "title": "AI在游戏里能做什么？你希望游戏里出现什么样的AI？",
+    "url": "https://www.gcores.com/radios/196305",
+    "start": 120,
+    "duration": 120,
+    "path": "benchmarks\\clips\\ai_1.wav"
+  },
+  {
+    "id": "ai_2",
+    "title": "AI在游戏里能做什么？你希望游戏里出现什么样的AI？",
+    "url": "https://www.gcores.com/radios/196305",
+    "start": 600,
+    "duration": 120,
+    "path": "benchmarks\\clips\\ai_2.wav"
+  },
+  {
+    "id": "military_1",
+    "title": "红海危局背后：破碎的也门与强势的胡塞，从何而来？",
+    "url": "https://www.gcores.com/radios/220465",
+    "start": 120,
+    "duration": 120,
+    "path": "benchmarks\\clips\\military_1.wav"
+  },
+  {
+    "id": "military_2",
+    "title": "红海危局背后：破碎的也门与强势的胡塞，从何而来？",
+    "url": "https://www.gcores.com/radios/220465",
+    "start": 600,
+    "duration": 120,
+    "path": "benchmarks\\clips\\military_2.wav"
+  },
+  {
+    "id": "interview_1",
+    "title": "战斗策划的入行与发展",
+    "url": "https://www.bilibili.com/video/BV1wfLUzwEUv",
+    "start": 120,
+    "duration": 120,
+    "path": "benchmarks\\clips\\interview_1.wav"
+  },
+  {
+    "id": "interview_2",
+    "title": "战斗策划的入行与发展",
+    "url": "https://www.bilibili.com/video/BV1wfLUzwEUv",
+    "start": 600,
+    "duration": 120,
+    "path": "benchmarks\\clips\\interview_2.wav"
+  }
+]
