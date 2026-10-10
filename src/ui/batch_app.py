@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 import queue
-import re
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
@@ -12,12 +11,15 @@ from tkinter import ttk, scrolledtext
 import urllib.parse
 import webbrowser
 from . import kit as ui
+from .reader import TranscriptReader, parse_document
 from ..config import load_config, save_config
 from ..paths import OUTPUT_ROOT, APP_ICON, resolve_owned
 from ..services.scheduler import Scheduler
 from ..core.textout import read_document, sanitize_filename
-from ..core.bilibili import fmt_ts
 from ..core.topics import create_topic
+from ..core.library import ORIGINAL, READING, originals, topics, reading_path
+from ..core.documents import record_path
+from ..core.reading import fingerprint
 
 
 class BatchApp(tk.Tk):
@@ -82,7 +84,7 @@ class BatchApp(tk.Tk):
         header.pack(fill="x", padx=22, pady=(16, 12))
         brand = self.label(header, "文字稿", 20, True)
         brand.pack(side="left")
-        description = self.label(header, "B 站 · 抖音 · 机核  /  本地转写与阅读", color=ui.T.text2)
+        description = self.label(header, "B 站 · 抖音 · 机核  /  转写与阅读", color=ui.T.text2)
         description.pack(side="left", padx=16)
         def header_layout(event):
             if event.width < 1050:
@@ -92,7 +94,10 @@ class BatchApp(tk.Tk):
         header.bind('<Configure>', header_layout)
         self.button(header, "设置", self.settings).pack(side="right")
         self.button(header, "运行日志", self.toggle_logs).pack(side="right", padx=8)
-        ui.Pill(header, text="自动识别", bg=ui.T.bg).pack(side="right", padx=8)
+        self.engine_var = tk.StringVar(value='在线' if self.cfg.get('engine') == 'cloud' else '本地')
+        self.engine_box = ttk.Combobox(header, textvariable=self.engine_var, values=('本地','在线'), state='readonly', width=7)
+        self.engine_box.pack(side='right', padx=8)
+        self.engine_box.bind('<<ComboboxSelected>>', self.change_engine)
 
         new = ui.Card(self, pad=16, border_color=ui.T.border_card)
         new.pack(fill="x", padx=18, pady=(0, 12))
@@ -162,6 +167,9 @@ class BatchApp(tk.Tk):
         self.tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self.select_task)
+        self.queue_menu = tk.Menu(self, tearoff=False)
+        self.queue_menu.add_command(label='重命名稿件', command=self.rename_transcript)
+        self.tree.bind('<Button-3>', self.queue_context_menu)
         for name, color in (("done", "#248A3D"), ("fail", "#D70015"), ("active", ui.T.accent)):
             self.tree.tag_configure(name, foreground=color)
         self.task_detail = tk.StringVar(value="完成后选中任务，即可阅读文字稿")
@@ -181,24 +189,21 @@ class BatchApp(tk.Tk):
         self.document_box.pack(fill="x", pady=(0, 10))
         self.document_box.bind("<<ComboboxSelected>>", self.select_document)
         self.document_title = tk.StringVar(value="选择已有稿件，或等待任务完成")
-        title = self.label(r, size=11, bold=True, anchor="w", justify="left", textvariable=self.document_title, wraplength=440)
-        title.pack(fill="x", pady=(0, 8))
-        r.bind("<Configure>", lambda e: title.configure(wraplength=max(100, e.width - 20)))
         view = self.row(r)
-        self.mode_var = tk.StringVar(value="带时间戳")
-        self.mode_box = ttk.Combobox(view, textvariable=self.mode_var, values=("带时间戳", "通读", "原始记录"), state="readonly", width=12)
+        self.mode_var = tk.StringVar(value=ORIGINAL)
+        self.mode_box = ttk.Combobox(view, textvariable=self.mode_var, values=(ORIGINAL, READING), state="readonly", width=12)
         self.mode_box.pack(side="left")
         self.mode_box.bind("<<ComboboxSelected>>", lambda e: self.render())
+        self.organize_button = self.button(view, '整理', self.organize_document, 'primary')
+        self.organize_button.configure(state='disabled')
         self._responsive_actions(view, [self.mode_box,
+                                       self.organize_button,
                                        self.button(view, '打开文件夹', self.open_output),
                                        self.button(view, "打开来源", self.open_source)])
-        self.reader = scrolledtext.ScrolledText(r, wrap="word", relief="flat", bd=0,
-                                               font=ui.ui_font(self, 11), bg=ui.T.surface, fg=ui.T.text,
-                                               padx=5, pady=5, spacing1=4, spacing3=10, selectbackground="#C7E0FF")
+        self.reader = TranscriptReader(r)
         self.reader.pack(fill="both", expand=True)
-        self.reader.tag_configure("timestamp", foreground=ui.T.accent)
-        self.reader.insert("1.0", "在左侧加入 B 站、抖音或机核链接。\n\n已有文字稿可以从上方列表直接打开。\n\n主题文件夹只输出 TXT，识别记录由程序内部保存。")
-        self.reader.configure(state="disabled")
+        self.reader.show_message('选择稿件，开始阅读',
+                                 '在左侧加入 B 站、抖音或机核链接，或从上方列表打开已有稿件。')
         actions = self.row(r)
         # Reserve the bottom controls before the expanding text viewport.
         actions.pack_configure(side="bottom", before=self.reader, pady=(12, 0))
@@ -228,7 +233,8 @@ class BatchApp(tk.Tk):
         frame.after_idle(arrange)
 
     def _save_settings(self):
-        save_config(topic=self.topic_var.get(), cookie=self.cookie_var.get(), geometry=self.geometry(), show_logs=self.logs_visible)
+        save_config(topic=self.topic_var.get(), cookie=self.cookie_var.get(), geometry=self.geometry(), show_logs=self.logs_visible,
+                    engine='cloud' if self.engine_var.get() == '在线' else 'local')
         if hasattr(self, "scheduler"):
             self.scheduler.cookie = self.cookie_var.get()
 
@@ -238,7 +244,13 @@ class BatchApp(tk.Tk):
             self.status_var.set("请先粘贴 B 站、抖音或机核链接")
             self.link_field.focus_set()
             return
-        added, duplicates, errors = self.scheduler.enqueue(raw, self.topic_var.get(), self.cookie_var.get())
+        engine = 'cloud' if self.engine_var.get() == '在线' else 'local'
+        from ..core.cloud import configured
+        if engine == 'cloud' and not configured():
+            self.status_var.set('请先填写百炼 API Key；输入一次即可自动使用在线方式')
+            self.settings()
+            return
+        added, duplicates, errors = self.scheduler.enqueue(raw, self.topic_var.get(), self.cookie_var.get(), engine)
         if added:
             self.link_var.set("")
             self._save_settings()
@@ -255,7 +267,7 @@ class BatchApp(tk.Tk):
         else:
             self.scheduler.paused.set()
             self.pause_button.configure(text="继续")
-            self.status_var.set("已暂停派发；当前下载或识别阶段会完成")
+            self.status_var.set("已暂停派发；当前下载、识别或整理分块会完成")
 
     def remove(self):
         identities = set(self.tree.selection())
@@ -265,14 +277,77 @@ class BatchApp(tk.Tk):
             self.document = None
             self.document_var.set('')
             self.document_title.set('稿件已删除，请选择其他稿件')
-            self.reader.configure(state='normal')
-            self.reader.delete('1.0', 'end')
-            self.reader.configure(state='disabled')
+            self.reader.show_message('稿件已删除', '请从上方列表选择其他稿件。')
         self.status_var.set(f"已删除 {removed} 条任务及对应稿件" + ('；部分文件删除失败，请查看日志' if removed < len(identities) else ''))
 
     def retry(self):
         self.scheduler.retry(set(self.tree.selection()))
-        self.status_var.set("已重排所选任务的失败部分")
+        self.status_var.set("已重排所选任务的失败部分及失败的稿件整理")
+
+    def queue_context_menu(self, event):
+        self.queue_menu.unpost()
+        identity = self.tree.identify_row(event.y)
+        if not identity:
+            return 'break'
+        self.tree.selection_set(identity)
+        self.tree.focus(identity)
+        self.queue_menu.entryconfigure(0, state='normal' if self.scheduler.can_rename_transcript(identity) else 'disabled')
+        try:
+            self.queue_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.queue_menu.grab_release()
+        return 'break'
+
+    def rename_transcript(self):
+        selected = self.tree.selection()
+        if len(selected) != 1 or not self.scheduler.can_rename_transcript(selected[0]):
+            self.status_var.set('只能重命名已完成且稿件文件存在的任务')
+            return
+        identity = selected[0]
+        job = next(job for job in self.scheduler.snapshot() if job['jid'] == identity)
+        window = tk.Toplevel(self, bg=ui.T.bg)
+        window.title('重命名稿件')
+        window.transient(self)
+        window.resizable(False, False)
+        body = tk.Frame(window, bg=ui.T.bg, padx=20, pady=20)
+        body.pack(fill='both', expand=True)
+        self.label(body, '稿件名称', bold=True).pack(anchor='w', pady=(0, 8))
+        name = tk.StringVar(value=job['title'])
+        field = ui.TextField(body, textvariable=name, width=440)
+        field.pack(fill='x')
+        error = tk.StringVar()
+        self.label(body, textvariable=error, color=ui.T.error, wraplength=440, anchor='w', justify='left').pack(fill='x', pady=(8, 12))
+        actions = self.row(body)
+
+        def save(event=None):
+            try:
+                mapping = self.scheduler.rename_transcript(identity, name.get())
+            except (OSError, ValueError, RuntimeError) as exc:
+                error.set(str(exc))
+                return 'break'
+            current = Path(self.document['path']).resolve() if self.document else None
+            renamed_current = next((new for old, new in mapping.items() if resolve_owned(old) == current), None)
+            # Update the current document before refreshing the dropdown.
+            if renamed_current:
+                self.open_document(resolve_owned(renamed_current))
+            self.refresh_library()
+            updated = next(job for job in self.scheduler.snapshot() if job['jid'] == identity)
+            self.tree.item(identity, values=(updated['status'], updated['title'], f"{updated['progress']}%"))
+            if not renamed_current:
+                self.select_task()
+            self.status_var.set(f"稿件已重命名：{updated['title']}")
+            window.destroy()
+            return 'break'
+
+        self.button(actions, '取消', window.destroy).pack(side='left')
+        self.button(actions, '保存', save, 'primary').pack(side='right')
+        window.bind('<Return>', save)
+        window.bind('<Escape>', lambda event: window.destroy())
+        window.update_idletasks()
+        window.geometry(f'+{self.winfo_rootx() + (self.winfo_width() - window.winfo_reqwidth()) // 2}+{self.winfo_rooty() + 160}')
+        window.grab_set()
+        field.entry.focus_set()
+        field.entry.selection_range(0, 'end')
 
     def select_task(self, event=None):
         selected = self.tree.selection()
@@ -296,13 +371,29 @@ class BatchApp(tk.Tk):
             self.status_var.set(f"创建主题失败：{exc}")
 
     def refresh_topics(self):
-        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
-        self.topic_box.configure(values=sorted(p.name for p in OUTPUT_ROOT.iterdir() if p.is_dir()))
+        available = topics()
+        previous = getattr(self, '_known_topics', {self.cfg.get('topic', '')})
+        current = self.topic_var.get()
+        if current and current in previous and current not in available:
+            self.topic_var.set('')
+        self._known_topics = set(available)
+        self.topic_box.configure(values=available)
+
+    def organize_document(self):
+        if not self.document:
+            return
+        try:
+            queued = self.scheduler.request_reading(self.document['path'])
+            self.mode_var.set(READING)
+            self.render()
+            self.status_var.set('当前稿件已加入整理队列' if queued else '当前稿件已整理或正在整理')
+        except (OSError, ValueError) as exc:
+            self.status_var.set(f'无法整理：{exc}')
 
     def refresh_library(self):
         OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
         self.refresh_topics()
-        self.documents = sorted(OUTPUT_ROOT.rglob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        self.documents = sorted(originals(), key=lambda p: p.stat().st_mtime, reverse=True)
         self.document_box.configure(values=[f"{p.parent.name} / {p.stem}" for p in self.documents])
         if self.document and Path(self.document["path"]) in self.documents:
             self.document_box.current(self.documents.index(Path(self.document["path"])))
@@ -325,28 +416,52 @@ class BatchApp(tk.Tk):
     def render(self):
         if not self.document:
             return
-        self.reader.configure(state="normal")
-        self.reader.delete("1.0", "end")
-        self.row_times = {}
+        try:
+            self.document = read_document(self.document['path'])
+        except (OSError, ValueError) as exc:
+            self.status_var.set(f'读取稿件失败：{exc}')
+            return
         mode = self.mode_var.get()
-        if mode == "原始记录" and self.document["raw"]:
-            lines = [f"[{fmt_ts(s['start'])}–{fmt_ts(s['end'])}] {s['text']}" for s in self.document["raw"]["segments"]]
+        progress = (self.document['raw'] or {}).get('reading') or {}
+        valid = progress.get('source_hash') == fingerprint(self.document)
+        complete = reading_path(self.document['path']).is_file() and valid and progress.get('status') in ('完成','原文排版')
+        active = progress.get('status') in ('待整理','整理中','写入中') and (self.document['raw'] or {}).get('reading_requested', False)
+        self.organize_button.configure(state='disabled' if complete or active else 'normal')
+        self._readable_available = True
+        if mode == READING:
+            path = reading_path(self.document['path'])
+            progress = (self.document['raw'] or {}).get('reading') or {}
+            valid = progress.get('source_hash') == fingerprint(self.document)
+            if path.is_file() and valid and progress.get('status') in ('完成', '原文排版'):
+                text = path.read_text(encoding='utf-8-sig')
+            else:
+                self._readable_available = False
+                blocks = len(progress.get('blocks', []))
+                text = (f'整理阅读稿生成中（已处理 {blocks} 段）。\n\n时间戳原稿已保存，可切换查看。'
+                        if active else '尚未生成整理阅读稿。\n\n点击上方“整理”，仅整理当前稿件。')
+                if progress.get('status') == '整理失败':
+                    text = f'整理失败：{progress.get("error", "请查看运行日志")}\n\n点击上方“整理”重试。'
         else:
-            lines = self.document["text"].splitlines()
-            if mode == "原始记录":
-                self.status_var.set("这份历史稿件没有原始记录，显示现存文字稿")
-        stamp = ""
-        for row, line in enumerate(lines, 1):
-            match = re.match(r"\[([^\]]+)\]", line)
-            if match:
-                stamp = match.group(1)
-                if mode == "通读":
-                    line = line[match.end():].lstrip()
-            self.row_times[row] = stamp
-            self.reader.insert("end", line + "\n")
-            if match and mode != "通读":
-                self.reader.tag_add("timestamp", f"{row}.0", f"{row}.{len(match.group(0))}")
-        self.reader.configure(state="disabled")
+            text = self.document['text']
+        key = self.document['path'], mode
+        previous_scroll = self.reader.yview()[0] if getattr(self, '_rendered_document_key', None) == key else 0
+        source_lines = self.document['text'].splitlines()
+        has_title = source_lines and source_lines[0].startswith(('# ', '#\t'))
+        fallback_title = self.document['title'] if has_title else Path(self.document['path']).stem
+        layout = parse_document(text, fallback_title)
+        self.document_title.set(layout.title)
+        self.reader.show(layout)
+        self.row_times = self.reader.row_times
+        self.reader.yview_moveto(previous_scroll)
+        self._rendered_document_key = key
+        self._document_signature = self._signature()
+
+    def _signature(self):
+        if not self.document:
+            return None
+        original = Path(self.document['path'])
+        paths = (original, record_path(original), reading_path(original))
+        return tuple(p.stat().st_mtime_ns if p.exists() else None for p in paths)
 
     def _selection(self):
         try:
@@ -362,12 +477,17 @@ class BatchApp(tk.Tk):
             self.status_var.set(message)
 
     def copy_selection(self):
+        if not getattr(self, '_readable_available', True):
+            self.status_var.set('阅读稿尚未完成，请切换到时间戳原稿')
+            return
         text, row = self._selection()
         self._copy(text, "选段已复制")
 
     def copy_all(self):
-        if self.document:
-            self._copy(self.reader.get("1.0", "end-1c"), "当前视图全文已复制")
+        if self.document and getattr(self, '_readable_available', True):
+            self._copy(self.reader.copy_text, "当前视图全文已复制")
+        elif self.document:
+            self.status_var.set('阅读稿尚未完成，请切换到时间戳原稿')
 
     def open_source(self):
         if self.document:
@@ -385,7 +505,9 @@ class BatchApp(tk.Tk):
             self.log_frame.pack_forget()
 
     def open_output(self):
-        directory = Path(self.document['path']).parent if self.document else OUTPUT_ROOT / sanitize_filename(self.topic_var.get() or '未分类')
+        category = READING if self.mode_var.get() == READING else ORIGINAL
+        directory = ((reading_path(self.document['path']) if category == READING else Path(self.document['path'])).parent
+                     if self.document else OUTPUT_ROOT / category / sanitize_filename(self.topic_var.get() or '未分类'))
         if not directory.resolve().is_relative_to(OUTPUT_ROOT.resolve()):
             self.status_var.set('无法打开项目外的文件夹')
             return
@@ -405,6 +527,7 @@ class BatchApp(tk.Tk):
         if self.closing:
             return
         jobs = self.scheduler.snapshot()
+        self.refresh_topics()
         seen = set(self.tree.get_children())
         for job in jobs:
             identity = job["jid"]
@@ -422,12 +545,12 @@ class BatchApp(tk.Tk):
         if selected:
             job = next((j for j in jobs if j["jid"] == selected[0]), None)
             if job:
-                self.task_detail.set(f"主题：{job['topic']}\n{job['detail'] or job['error'] or job['status']}")
+                self.task_detail.set(f"主题：{job['topic']} · {'在线' if job.get('engine') == 'cloud' else '本地'}\n{job['detail'] or job['error'] or job['status']}")
         while True:
             try:
                 event, message = self.scheduler.events.get_nowait()
                 self.append_log(message)
-                if message.startswith("已生成"):
+                if message.startswith(("已生成", '已整理')):
                     self.refresh_library()
             except queue.Empty:
                 break
@@ -438,12 +561,23 @@ class BatchApp(tk.Tk):
                 self.append_log(message)
             except queue.Empty:
                 break
+        if self.document:
+            try:
+                if self._signature() != getattr(self, '_document_signature', None):
+                    self.render()
+            except (OSError, ValueError):
+                pass
         self.after(250, self._refresh)
 
+    def change_engine(self, event=None):
+        self._save_settings()
+        self.status_var.set(f'{self.engine_var.get()}识别与整理；切换只影响新加入的任务')
+
     def settings(self):
+        from ..core import cloud
         window = tk.Toplevel(self)
-        window.title("本地设置")
-        window.geometry("650x350")
+        window.title("设置")
+        window.geometry("650x455")
         window.configure(bg=ui.T.bg)
         window.transient(self)
         card = ui.Card(window, pad=20)
@@ -455,10 +589,29 @@ class BatchApp(tk.Tk):
         field.entry.configure(show="•")
         field.pack(fill="x", pady=(0, 12))
         field.entry.bind("<FocusOut>", lambda e: self._save_settings())
-        self.button(body, "保存设置", lambda: (self._save_settings(), window.destroy()), "primary").pack(anchor="e")
-        self.label(body, "识别档位自动决定，无需选择模型。", 9, color=ui.T.text2).pack(anchor="w", pady=(20, 8))
-        self.button(body, "下载 / 修复标点模型", self.download_punctuation).pack(anchor="w")
-        self.label(body, "下载状态显示在主窗口，关闭主窗口会取消下载。", 9, color=ui.T.text2).pack(anchor="w", pady=8)
+        self.label(body, '阿里云百炼 API Key（在线方式）', 11, True).pack(anchor='w', pady=(8,0))
+        self.label(body, '已加密保存；留空保留密钥。在线任务会发送音频与文字到百炼。' if cloud.configured() else '北京地域；密钥本机加密。在线任务会发送音频与文字到百炼。',
+                   9, color=ui.T.text2).pack(anchor='w', pady=8)
+        key = tk.StringVar()
+        key_field = ui.TextField(body, textvariable=key, width=560)
+        key_field.entry.configure(show='•')
+        key_field.pack(fill='x')
+        self.label(body, '业务空间 ID（可选，使用专属域名时填写）', 9, color=ui.T.text2).pack(anchor='w', pady=(12,6))
+        workspace = tk.StringVar(value=cloud.read_json(cloud.SETTINGS, {}).get('workspace',''))
+        ui.TextField(body, textvariable=workspace, width=560).pack(fill='x')
+        error = tk.StringVar()
+        self.label(body, textvariable=error, size=9, color=ui.T.error).pack(anchor='w', pady=8)
+        def save():
+            try:
+                if key.get().strip() or cloud.configured() or workspace.get().strip():
+                    cloud.save_credentials(key.get(), workspace.get())
+                key.set('')
+                self._save_settings()
+                self.status_var.set('设置已保存；本地／在线切换只影响新任务')
+                window.destroy()
+            except (OSError, ValueError, RuntimeError) as exc:
+                error.set(str(exc))
+        self.button(body, "保存设置", save, "primary").pack(anchor="e")
 
     def download_punctuation(self):
         if getattr(self, "model_thread", None) and self.model_thread.is_alive():
@@ -485,7 +638,7 @@ class BatchApp(tk.Tk):
         self._save_settings()
         self.closing = True
         self.model_cancel.set()
-        self.status_var.set("正在保存队列并停止后台识别…")
+        self.status_var.set("正在保存进度并停止后台识别与整理…")
         self.update_idletasks()
         self.scheduler.shutdown()
         self.destroy()

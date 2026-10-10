@@ -2,6 +2,7 @@
 Pillow==12.3.0
 pypinyin==0.55.0
 yt-dlp==2026.8.19
+pywebview==6.2.1
 faster-whisper==1.2.1
 av==18.1.0
 ctranslate2==4.8.2

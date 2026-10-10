@@ -24,6 +24,20 @@ def find_video_record(value, video_id):
                 return found
 
 
+def playback_info(record, video_id):
+    """Accept a matching video record, never the soundtrack or another item."""
+    if not record or str(record.get('aweme_id', record.get('id', ''))) != str(video_id):
+        raise ValueError('抖音播放信息与任务不符')
+    video = record.get('video', {})
+    addresses = video.get('play_addr', {}).get('url_list', [])
+    media = next((u for u in addresses if isinstance(u, str) and urllib.parse.urlsplit(u).scheme == 'https'), None)
+    if not media:
+        raise ValueError('抖音未提供视频播放地址；可能是图集或视频不可访问')
+    return dict(title=record.get('desc') or f'抖音视频_{video_id}',
+                duration=float(video.get('duration', 0)) / 1000,
+                media_url=media, source_url=f'https://www.douyin.com/video/{video_id}')
+
+
 def parse_share_page(page, video_id):
     payloads = []
     for match in re.finditer(r'(?:window\.)?(?:_ROUTER_DATA|__INITIAL_STATE__)\s*=\s*', page):
@@ -41,19 +55,11 @@ def parse_share_page(page, video_id):
             continue
         record = find_video_record(data, video_id)
         if record:
-            video = record['video']
-            # The music URL can contain only background music. Always use the
-            # actual video playback stream to retain the spoken content.
-            addresses = video.get('play_addr', {}).get('url_list', [])
-            media = next((u for u in addresses if urllib.parse.urlsplit(u).scheme in ('http', 'https')), None)
-            if media:
-                return dict(title=record.get('desc') or f'抖音视频_{video_id}',
-                            duration=float(video.get('duration', 0)) / 1000,
-                            media_url=media, source_url=f'https://www.douyin.com/video/{video_id}')
+            return playback_info(record, video_id)
     raise ValueError('抖音分享页未提供可获取的视频音频')
 
 
-def fetch_douyin_video(video_id, cancel=None):
+def fetch_douyin_video(video_id, cancel=None, progress=None):
     check_cancel(cancel)
     try:
         request = urllib.request.Request(f'https://www.iesdouyin.com/share/video/{video_id}/',
@@ -73,8 +79,10 @@ def fetch_douyin_video(video_id, cancel=None):
         check_cancel(cancel)
         return dict(title=info.get('title') or f'抖音视频_{video_id}', duration=info.get('duration') or 0,
                     source_url=f'https://www.douyin.com/video/{video_id}', media_url='')
-    except yt_dlp.utils.DownloadError as exc:
-        raise RuntimeError('抖音限制了直接访问，当前无法获取视频音频；需要可用的平台访问会话。不支持已删除、私密视频或图集') from exc
+    except yt_dlp.utils.DownloadError:
+        check_cancel(cancel)
+        from .douyin_browser import fetch_browser_video
+        return fetch_browser_video(video_id, cancel, progress)
 
 
 class _Logger:

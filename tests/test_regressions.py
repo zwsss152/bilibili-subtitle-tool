@@ -200,7 +200,7 @@ class RegressionTests(unittest.TestCase):
         scheduler.enqueue("BV17x411w7KC", "主题一", "")
         scheduler.enqueue("BV1wfLUzwEUv", "主题二", "")
         self.assertEqual([j.topic for j in scheduler.jobs], ["主题一", "主题二"])
-        self.assertEqual(scheduler.jobs[0].output_dir, str(Path("文字稿") / "主题一"))
+        self.assertEqual(scheduler.jobs[0].output_dir, str(Path("文字稿") / "时间戳原稿" / "主题一"))
 
     def test_chinese_subtitle_is_preferred_and_cookie_is_forwarded(self):
         from src.services import scheduler as module

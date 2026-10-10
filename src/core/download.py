@@ -10,6 +10,24 @@ from concurrent.futures import ThreadPoolExecutor
 from .net import JobCancelled, check_cancel, headers_for
 from ..paths import ASR_CACHE_DIR
 
+CACHE_LIMIT = 1024 ** 3
+_CACHE_LOCK = threading.RLock()
+
+
+def check_cache_budget(destination, extra=0):
+    """Bound the actual shared task cache, including unknown-length downloads."""
+    if not Path(destination).resolve().is_relative_to(ASR_CACHE_DIR.resolve()):
+        return
+    used = 0
+    for path in ASR_CACHE_DIR.rglob('*'):
+        try:
+            if path.is_file():
+                used += path.stat().st_size
+        except FileNotFoundError:
+            pass  # A completed task can clean its own cache concurrently.
+    if used + extra > CACHE_LIMIT:
+        raise RuntimeError('临时音频缓存已达到 1 GiB 上限；请等待当前任务完成后重试')
+
 
 def find_ffmpeg():
     try:
@@ -30,6 +48,7 @@ def download_audio(url, tag, workdir, progress_cb, cookie="", cancel=None):
 
     def hook(data):
         check_cancel(cancel)
+        check_cache_budget(directory)
         if data.get("status") == "downloading":
             total = data.get("total_bytes") or data.get("total_bytes_estimate") or 0
             done = data.get("downloaded_bytes", 0)
@@ -44,6 +63,7 @@ def download_audio(url, tag, workdir, progress_cb, cookie="", cancel=None):
     with yt_dlp.YoutubeDL(options) as downloader:
         downloader.download([url])
     check_cancel(cancel)
+    check_cache_budget(directory)
     target = directory / f"{tag}.m4a"
     if not target.is_file() or target.stat().st_size < 100:
         raise RuntimeError("音频下载没有产生有效文件")
@@ -91,7 +111,10 @@ def download_direct_audio(url, dest_path, progress_cb, threads=4, cancel=None):
                     done += len(chunk)
                     if expected and done > expected:
                         raise RuntimeError("音频响应超过预期大小")
-                    stream.write(chunk)
+                    with _CACHE_LOCK:
+                        check_cache_budget(temporary, len(chunk) if start is None else 0)
+                        stream.write(chunk)
+                        stream.flush()
                     with lock:
                         counts[index] = done
                         total_done = sum(counts.values())
@@ -105,8 +128,10 @@ def download_direct_audio(url, dest_path, progress_cb, threads=4, cancel=None):
     try:
         if ranges and size >= 2 * 1024 * 1024:
             count = max(1, min(threads, size // (1024 * 1024)))
-            with temporary.open("wb") as stream:
-                stream.truncate(size)
+            with _CACHE_LOCK:
+                check_cache_budget(temporary, size)
+                with temporary.open("wb") as stream:
+                    stream.truncate(size)
             step = size // count
             with ThreadPoolExecutor(max_workers=count) as pool:
                 futures = [pool.submit(transfer, i * step, size - 1 if i == count - 1 else (i + 1) * step - 1, i)

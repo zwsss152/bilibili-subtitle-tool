@@ -78,6 +78,13 @@ def _out_of_memory(error):
     return any(word in message for word in ("out of memory", "cuda_error_out_of_memory", "failed to allocate"))
 
 
+def unload_model():
+    """Release recognition weights before the same process starts editing."""
+    global _MODEL, _KEY
+    _MODEL, _KEY = None, None
+    gc.collect()
+
+
 def transcribe(audio_path, profile=None, progress=lambda *a: None, cancel=None, hotwords="", log=lambda *a: None):
     profile = dict(profile or selected_profile())
     check_cancel(cancel)
@@ -98,8 +105,8 @@ def transcribe(audio_path, profile=None, progress=lambda *a: None, cancel=None, 
         try:
             model = get_asr_model(profile["model"], device=profile["device"], compute_type=profile["compute_type"])
             options = dict(beam_size=profile.get("beam_size", 3), vad_filter=True,
-                           repetition_penalty=1.05, no_repeat_ngram_size=0,
-                           initial_prompt="以下是普通话访谈，请准确记录原话、数字和专有名词，并使用简体中文标点。",
+                           repetition_penalty=1.0, no_repeat_ngram_size=0,
+                           initial_prompt=None,
                            language="zh", task="transcribe")
             if hotwords:
                 options["hotwords"] = hotwords[:120]
@@ -131,7 +138,10 @@ def transcribe(audio_path, profile=None, progress=lambda *a: None, cancel=None, 
             if profile.get('review_chinese'):
                 from .chinese_review import review
                 output, review_info = review(audio_path, output, progress, cancel, log)
-            return dict(segments=output, recognition={**profile, "duration": information.duration,
+            from .chinese_review import damaged
+            if any(damaged(s['text']) for s in output):
+                raise RuntimeError('本地识别仍含异常字符，本次未判定成功；请重试或使用在线方式')
+            return dict(segments=output, recognition={**profile, "engine":"local", "policy":"audio-review-v2", "duration": information.duration,
                          "language": information.language, "chinese_review": review_info,
                          "elapsed_seconds": time.perf_counter() - started})
         except JobCancelled:

@@ -49,6 +49,7 @@ def fetch_video_info(id_type, id_value, cookie=""):
         "bvid": d.get("bvid", ""),
         "title": d.get("title", ""),
         "owner": (d.get("owner") or {}).get("name", ""),
+        "description": d.get('desc',''),
         "duration": d.get("duration", 0),
         "pages": pages,
     }
