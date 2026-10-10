@@ -6,7 +6,7 @@ from pathlib import Path
 from .paths import CONFIG_PATH
 
 _LOCK = threading.RLock()
-_DEFAULTS = dict(topic="", cookie="", show_cookie=False, geometry="", show_logs=False)
+_DEFAULTS = dict(topic="", cookie="", show_cookie=False, geometry="", show_logs=False, engine='local')
 
 
 def read_json(path, default=None):

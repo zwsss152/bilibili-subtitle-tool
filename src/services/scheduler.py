@@ -13,8 +13,13 @@ from ..core.net import JobCancelled, check_cancel
 from ..core.download import download_audio, download_direct_audio, cleanup_owned, cleanup_stale_cache
 from ..core.textout import save_result
 from ..core.documents import delete_outputs, record_path
+from ..core import rename as document_rename
 from .tasks import Task, Page, migrate_legacy
 from .recognizer import worker
+from .reading_service import ReadingService
+from ..core.editor_model import LocalEditor
+from ..core.cloud import CloudClient, configured, checkpoint_path, discard_checkpoints
+from ..core.library import reading_path
 
 
 class Scheduler:
@@ -34,6 +39,7 @@ class Scheduler:
         self.cancel_signal = self.context.Event()
         self.jobs = []
         self._threads = []
+        document_rename.recover(self.state_path, self.log)
         stored = read_json(self.state_path, {})
         if self.state_path.exists():
             try:
@@ -58,6 +64,17 @@ class Scheduler:
             for page in job.pages:
                 if page.txt and record_path(PROJECT_ROOT / page.txt).exists():
                     page.raw = relative(record_path(PROJECT_ROOT / page.txt))
+                if page.txt:
+                    try:
+                        page.reading = relative(reading_path(PROJECT_ROOT / page.txt))
+                    except ValueError:
+                        # Diagnostic fixtures may live outside the export library.
+                        # Actual file operations still enforce their owned roots.
+                        pass
+        self.reading_service = ReadingService(self)
+        self.editor = LocalEditor()
+        self.cloud_editor = CloudClient()
+        self.process_engine = None
         if autostart:
             self.start()
 
@@ -66,7 +83,8 @@ class Scheduler:
 
     def start(self):
         cleanup_stale_cache(self.log)
-        self._start_process()
+        # GPU models are loaded on demand; only one GPU stage owns a model.
+        self.reading_service.scan()
         for target in (self._network_loop, self._recognition_loop):
             thread = threading.Thread(target=target, daemon=True)
             thread.start()
@@ -74,12 +92,13 @@ class Scheduler:
         if self.jobs:
             self.log(f"恢复队列 {len(self.jobs)} 条；已完成的分 P 不会重复处理")
 
-    def _start_process(self):
+    def _start_process(self, engine='local'):
         self.inputs = self.context.Queue()
         self.outputs = self.context.Queue()
         self.cancel_signal.clear()
         self.process = self.context.Process(target=worker, args=(self.inputs, self.outputs, self.cancel_signal), daemon=True)
         self.process.start()
+        self.process_engine = engine
 
     def _terminate_process(self):
         if self.process:
@@ -88,6 +107,7 @@ class Scheduler:
             self.process.join(timeout=3)
             self.process.close()
             self.process = None
+            self.process_engine = None
         for channel in (getattr(self, "inputs", None), getattr(self, "outputs", None)):
             if channel:
                 channel.cancel_join_thread()
@@ -104,25 +124,28 @@ class Scheduler:
         with self.lock:
             return [{**job.to_dict(), "progress": job.progress} for job in self.jobs]
 
-    def enqueue(self, text, topic, cookie):
+    def enqueue(self, text, topic, cookie, engine='local'):
+        if engine == 'cloud' and not configured():
+            return 0, 0, ['请先在设置中填写阿里云百炼 API Key，再使用在线方式']
         sources, rejected = extract_sources(text)
         added, duplicates = 0, 0
         with self.lock:
             self.cookie = cookie
             for source in sources:
-                if any(job.key == (source.kind, source.ref, source.page) for job in self.jobs):
+                if any(job.key == (source.kind, source.ref, source.page) and job.engine == engine for job in self.jobs):
                     duplicates += 1
                     continue
-                self.jobs.append(Task.create(source, topic))
+                self.jobs.append(Task.create(source, topic, engine))
                 added += 1
         self._persist()
         return added, duplicates, rejected
 
     def remove(self, identities):
         removed = 0
-        with self.lock:
+        with self.persist_lock, self.lock:
+            document_rename.recover(self.state_path, self.log)
             protected = [PROJECT_ROOT / path for job in self.jobs if job.jid not in identities
-                         for page in job.pages for path in (page.txt, page.raw) if path]
+                         for page in job.pages for path in (page.txt, page.raw, page.reading) if path]
             for job in self.jobs:
                 if job.jid in identities:
                     job.cancelled = True
@@ -130,6 +153,7 @@ class Scheduler:
                         self.cancel_signal.set()
                     try:
                         delete_outputs(job.pages, protected)
+                        discard_checkpoints(job.jid)
                         removed += 1
                     except (OSError, ValueError) as exc:
                         job.status, job.error = '失败', f'删除稿件失败：{exc}'
@@ -141,6 +165,52 @@ class Scheduler:
         self._persist()
         return removed
 
+    def can_rename_transcript(self, jid):
+        with self.lock:
+            job = next((job for job in self.jobs if job.jid == jid), None)
+            return bool(job and job.status == '完成' and job.pages and all(
+                page.status == '完成' and page.txt and (PROJECT_ROOT / page.txt).is_file()
+                for page in job.pages))
+
+    def rename_transcript(self, jid, new_name):
+        # Same lock order as persistence; no worker can save during this transaction.
+        with self.persist_lock, self.lock:
+            document_rename.recover(self.state_path, self.log)
+            if not self.can_rename_transcript(jid):
+                raise ValueError('只能重命名已完成且稿件文件存在的任务')
+            job = next(job for job in self.jobs if job.jid == jid)
+            owned = {str((PROJECT_ROOT / p.txt).resolve()).casefold() for p in job.pages}
+            if any(str((PROJECT_ROOT / p.txt).resolve()).casefold() in owned
+                   for other in self.jobs if other.jid != jid for p in other.pages if p.txt):
+                raise ValueError('稿件还被其他任务引用，不能单独重命名')
+            old_title = job.title
+            old_pages = [(p, p.title, p.txt, p.raw, p.reading) for p in job.pages]
+            journal, transaction = document_rename.prepare(job, new_name, self.state_path)
+            try:
+                document_rename.apply(transaction)
+                job.title = transaction['title']
+                for page, renamed in zip(job.pages, transaction['pages']):
+                    page.title, page.txt, page.raw = renamed['title'], renamed['txt'], renamed['raw']
+                    page.reading = renamed['reading']
+                # A failed save must propagate, unlike routine best-effort persistence.
+                atomic_json(self.state_path, dict(version=2, jobs=[j.to_dict() for j in self.jobs]))
+            except Exception:
+                job.title = old_title
+                for page, title, txt, raw, reading in old_pages:
+                    page.title, page.txt, page.raw, page.reading = title, txt, raw, reading
+                document_rename.rollback(transaction)
+                journal.unlink()
+                raise
+            try:
+                transaction['committed'] = True
+                atomic_json(journal, transaction)
+                journal.unlink()
+            except OSError:
+                self.log('重命名已保存，内部事务记录将在下次启动清理')
+            mapping = {txt: page.txt for page, _, txt, _, _ in old_pages}
+            mapping.update({reading: page.reading for page, _, _, _, reading in old_pages if reading})
+            return mapping
+
     def retry(self, identities):
         with self.lock:
             for job in self.jobs:
@@ -149,12 +219,16 @@ class Scheduler:
                     for page in job.pages:
                         if page.status == "失败":
                             page.status, page.progress, page.error = "排队中", 0, ""
+                        if page.txt and page.reading_requested and page.reading_status == '整理失败':
+                            page.reading_status, page.reading_error = '待整理', ''
+                            self.reading_service.enqueue((job.jid,page.number))
                     job.status = "排队中"
                     job.update_status()
         self._persist()
 
     def clear_finished(self):
-        with self.lock:
+        with self.persist_lock, self.lock:
+            document_rename.recover(self.state_path, self.log)
             self.jobs = [job for job in self.jobs if job.status not in ("完成", "失败", "部分失败")]
         self._persist()
 
@@ -229,7 +303,8 @@ class Scheduler:
             title = info["title"]
             ref = "bvid:" + info["bvid"]
         elif job.kind == 'douyin':
-            info = douyin.fetch_douyin_video(source.ref, lambda: self._cancelled(job))
+            info = douyin.fetch_douyin_video(source.ref, lambda: self._cancelled(job),
+                                           lambda msg: self._change(job, detail=msg))
             title, ref = info['title'], source.ref
             new_pages = [Page(1, title, source.url, info['duration'])]
             job._info = info
@@ -254,7 +329,8 @@ class Scheduler:
             id_type, value = job.ref.split(":", 1)
             job._info = bilibili.fetch_video_info(id_type, value, self.cookie)
         elif job.kind == 'douyin':
-            job._info = douyin.fetch_douyin_video(job.ref, lambda: self._cancelled(job))
+            job._info = douyin.fetch_douyin_video(job.ref, lambda: self._cancelled(job),
+                                                lambda msg: self._change(job, detail=msg))
         else:
             job._info = gcores.fetch_gcores_radio(job.ref)
         return job._info
@@ -266,16 +342,22 @@ class Scheduler:
                                   {'bilibili': 'B站', 'gcores': '机核', 'douyin': '抖音'}[job.kind], method, segments,
                                   f"{job.jid[:8]}_p{page.number}", metadata, self.log)
             page.txt, page.raw = relative(txt), relative(raw)
+            page.reading = relative(reading_path(txt))
+            page.reading_status = '未整理'
+            page.reading_requested = False
             page.status, page.progress = "完成", 100
             job.update_status()
         self.log(f"已生成：{page.title}（{job.topic}）")
         self._persist()
 
+    def request_reading(self, path):
+        return self.reading_service.request(path)
+
     def _prepare(self, job, page):
         cancel = lambda: self._cancelled(job)
         check_cancel(cancel)
         info = self._ensure_info(job)
-        if job.kind == "bilibili":
+        if job.kind == "bilibili" and job.engine == 'local':
             cid = next(p["cid"] for p in info["pages"] if p["page"] == page.number)
             try:
                 subtitles = bilibili.fetch_subtitle_list(info["bvid"], cid, self.cookie)
@@ -284,8 +366,11 @@ class Scheduler:
                     items = bilibili.download_subtitle(chosen["subtitle_url"], self.cookie)
                     segments = [dict(start=a, end=b, text=t) for a, b, t in items]
                     check_cancel(cancel)
-                    self._save(job, page, segments, f"CC字幕（{chosen.get('lan', '')}）")
-                    return
+                    # Automatic captions are reference material, not a reliable
+                    # substitute for audio. Retain uploader-authored captions.
+                    if not chosen.get('ai_status') and not chosen.get('lan','').startswith('ai-'):
+                        self._save(job, page, segments, f"CC字幕（{chosen.get('lan', '')}）", {'engine':'local'})
+                        return
             except JobCancelled:
                 raise
             except Exception as exc:
@@ -349,16 +434,35 @@ class Scheduler:
                 job, page, audio, directory = self.ready.get(timeout=0.1)
             except queue.Empty:
                 self._drain_idle_logs()
+                with self.lock:
+                    active = any(j.status not in ('完成', '失败', '部分失败') and not j.cancelled for j in self.jobs)
+                if self.reading_service.has_work(allow_history=not active):
+                    if self.process:
+                        self._terminate_process()
+                    self.reading_service.step(self.editor, allow_history=not active)
+                elif self.editor.process:
+                    self.editor.close()
                 continue
             self.slots.release()
             if self._cancelled(job):
                 self._cleanup(directory)
                 continue
             identity = job.jid, page.number
+            self.editor.close()
+            self.cloud_editor.close()
+            if self.process and self.process_engine != job.engine:
+                self._terminate_process()
+            if self.process is None:
+                self._start_process(job.engine)
             self.current = identity
             self.cancel_signal.clear()
-            self._change(job, page, "识别中", "本地语音识别", 0, True)
-            self.inputs.put(dict(identity=identity, audio=audio, title=job.title))
+            self._change(job, page, "识别中", "在线语音识别" if job.engine == 'cloud' else "本地语音识别", 0, True)
+            checkpoint = checkpoint_path(job.jid, page.number)
+            context = job.title
+            if job.engine == 'cloud':
+                context = (job.title + '\n' + getattr(job,'_info',{}).get('description',''))[:400]
+            self.inputs.put(dict(identity=identity, audio=audio, title=context,
+                                 engine=job.engine, checkpoint=str(checkpoint)))
             cancelled_at = None
             try:
                 while not self.stopping.is_set():
@@ -368,14 +472,14 @@ class Scheduler:
                         if time.monotonic() - cancelled_at > 3:
                             self._terminate_process()
                             if not self.stopping.is_set():
-                                self._start_process()
+                                self._start_process(job.engine)
                             raise JobCancelled()
                     try:
                         event, result_identity, value = self.outputs.get(timeout=0.15)
                     except queue.Empty:
                         if not self.process.is_alive():
                             self._terminate_process()
-                            self._start_process()
+                            self._start_process(job.engine)
                             raise RuntimeError("识别进程意外结束，任务可重试")
                         continue
                     if event == "log":
@@ -388,7 +492,7 @@ class Scheduler:
                     elif event == "result":
                         recognition = value['recognition']
                         reviewed = (recognition.get('chinese_review') or {}).get('available')
-                        method = f"语音识别（{recognition['model']}" + (' + 中文语音复核）' if reviewed else '）')
+                        method = ('在线' if job.engine == 'cloud' else '本地') + f"语音识别（{recognition['model']}" + (' + 中文语音复核）' if reviewed else '）')
                         self._save(job, page, value["segments"], method, recognition)
                         break
                     elif event == "cancelled":
@@ -406,8 +510,12 @@ class Scheduler:
             finally:
                 self.current = None
                 self._cleanup(directory)
+                if job.cancelled:
+                    discard_checkpoints(job.jid)
 
     def _drain_idle_logs(self):
+        if self.process is None:
+            return
         try:
             while True:
                 event, identity, value = self.outputs.get_nowait()
@@ -419,6 +527,8 @@ class Scheduler:
     def shutdown(self):
         self.stopping.set()
         self.cancel_signal.set()
+        self.editor.close()
+        self.cloud_editor.close()
         self._persist()
         for thread in self._threads:
             thread.join(timeout=1)

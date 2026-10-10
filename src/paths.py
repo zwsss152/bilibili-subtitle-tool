@@ -15,7 +15,8 @@ PROFILE_PATH = PROJECT_ROOT / "recognition_profile.json"
 
 
 def initialize():
-    for directory in (OUTPUT_ROOT, RECORDS_DIR, MODELS_DIR, ASR_CACHE_DIR, LOGS_DIR):
+    from .core.library import ORIGINAL, READING
+    for directory in (OUTPUT_ROOT / ORIGINAL, OUTPUT_ROOT / READING, RECORDS_DIR, MODELS_DIR, ASR_CACHE_DIR, LOGS_DIR):
         directory.mkdir(parents=True, exist_ok=True)
 
 

@@ -73,6 +73,8 @@ def add_punctuation(text, log=None, punctuator=None):
 
 
 def _join(left, right):
+    if left and right and left[-1].isdigit() and right[0].isdigit():
+        return left + right  # Word timestamps can split 35 into separate 3 / 5 tokens.
     if left and right and left[-1].isascii() and left[-1].isalnum() and right[0].isascii() and right[0].isalnum():
         return left + " " + right
     return left + right
@@ -103,7 +105,8 @@ def build_paragraphs(items, gap_seconds=2.0, max_chars=220, punctuate=True, log=
             flush()
         if not buffer:
             start = float(frm)
-        buffer = _join(buffer, text)
+        joiner = item.get('joiner') if isinstance(item,dict) else None
+        buffer = buffer + (joiner if buffer and joiner is not None else '') + text if joiner is not None else _join(buffer,text)
         previous_end = float(end)
     flush()
     return paragraphs

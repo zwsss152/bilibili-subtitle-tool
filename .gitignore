@@ -52,4 +52,5 @@ benchmarks/reported-error/*.wav
 .data/
 benchmarks/douyin-*.html
 benchmarks/reported-error/*.json
+benchmarks/reported-damage/
 benchmarks/integration.json

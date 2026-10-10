@@ -5,7 +5,7 @@ import multiprocessing
 import os
 import sys
 import traceback
-from .paths import PROJECT_ROOT, LOGS_DIR, initialize
+from .paths import PROJECT_ROOT, LOGS_DIR, QUEUE_STATE_PATH, initialize
 
 _INSTANCE = None
 
@@ -45,7 +45,12 @@ def main():
         return
     try:
         from .core.documents import migrate_records
+        from .core.rename import recover
+        # A pending transaction can still own a legacy sidecar; recover it first.
+        recover(QUEUE_STATE_PATH, logging.getLogger('transcripts').info)
         migrate_records(logging.getLogger('transcripts').info)
+        from .core.library_migration import migrate_library
+        migrate_library(QUEUE_STATE_PATH, logging.getLogger('transcripts').info)
         from .ui.batch_app import BatchApp
         app = BatchApp()
         app.mainloop()

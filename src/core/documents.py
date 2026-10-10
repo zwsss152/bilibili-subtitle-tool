@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from ..paths import OUTPUT_ROOT, RECORDS_DIR, PROJECT_ROOT
 from ..config import atomic_json
+from .library import reading_path
 
 
 def record_path(txt):
@@ -40,7 +41,13 @@ def delete_outputs(pages, protected=()):
                 raise ValueError('稿件路径不在文字稿目录内，未删除')
             if txt in protected:
                 continue
-            paths.update((txt, txt.with_suffix('.json'), record_path(txt)))
+            paths.update((txt, txt.with_suffix('.json'), record_path(txt), reading_path(txt, OUTPUT_ROOT)))
+        if getattr(page, 'reading', ''):
+            reading = (PROJECT_ROOT / page.reading).resolve()
+            if not reading.is_relative_to(OUTPUT_ROOT.resolve()) or reading.suffix.lower() != '.txt':
+                raise ValueError('阅读稿路径超出允许范围，未删除')
+            if reading not in protected:
+                paths.add(reading)
         if page.raw:
             raw = (PROJECT_ROOT / page.raw).resolve()
             if raw.suffix.lower() != '.json' or not (
@@ -48,6 +55,7 @@ def delete_outputs(pages, protected=()):
                 raise ValueError('识别记录路径超出允许范围，未删除')
             if raw not in protected:
                 paths.add(raw)
+    paths.difference_update(protected)
     # Validate every resolved target before unlinking any; never remove folders.
     for path in paths:
         if not (path.resolve().is_relative_to(OUTPUT_ROOT.resolve()) or

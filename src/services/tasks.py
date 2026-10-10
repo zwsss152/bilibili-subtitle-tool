@@ -5,6 +5,7 @@ import uuid
 import re
 from ..paths import PROJECT_ROOT, OUTPUT_ROOT
 from ..core.textout import sanitize_filename
+from ..core.library import ORIGINAL
 
 DONE = {"完成", "失败", "已取消"}
 
@@ -20,6 +21,10 @@ class Page:
     txt: str = ""
     raw: str = ""
     error: str = ""
+    reading: str = ""
+    reading_status: str = "未整理"
+    reading_error: str = ""
+    reading_requested: bool = False
 
 
 @dataclass
@@ -37,12 +42,15 @@ class Task:
     error: str = ""
     pages: list[Page] = field(default_factory=list)
     cancelled: bool = False
+    engine: str = 'local'
 
     @classmethod
-    def create(cls, source, topic):
+    def create(cls, source, topic, engine='local'):
+        if engine not in ('local', 'cloud'):
+            raise ValueError('请选择本地或在线方式')
         topic = sanitize_filename(topic or "未分类")
         return cls(uuid.uuid4().hex, source.kind, source.ref, source.url, topic,
-                   str(Path("文字稿") / topic), source.page, source.url)
+                   str(Path("文字稿") / ORIGINAL / topic), source.page, source.url, engine=engine)
 
     @property
     def key(self):
@@ -76,6 +84,8 @@ class Task:
     def from_dict(cls, values, restore=True):
         fields = cls.__dataclass_fields__
         task = cls(**{k: v for k, v in values.items() if k in fields and k != "pages"})
+        if task.engine not in ('local', 'cloud'):
+            raise ValueError('任务识别方式无效')
         task.pages = [Page(**{k: v for k, v in page.items() if k in Page.__dataclass_fields__}) for page in values.get("pages", [])]
         if restore:
             task.cancelled = False
@@ -83,10 +93,16 @@ class Task:
                 if page.status not in DONE:
                     page.status, page.progress = "排队中", 0
                 if page.status == "完成" and not (PROJECT_ROOT / page.txt).is_file():
-                    page.status, page.progress = "排队中", 0
+                    page.status, page.progress = "失败", 0
+                    page.error = '原稿已被外部删除；点击重试可重新生成'
             if task.status not in ("完成", "失败", "部分失败"):
                 task.status = "排队中"
+            for page in task.pages:
+                if not page.reading_requested and (page.reading_status in ('待整理','写入中') or page.reading_status.startswith('整理中')):
+                    page.reading_status = '未整理'
             task.update_status()
+            if task.status == '完成' and any(p.reading_status == '未整理' for p in task.pages):
+                task.detail = '原稿已保存；点击整理生成阅读稿'
         return task
 
 
@@ -107,7 +123,7 @@ def migrate_legacy(values, default_topic):
         else:
             local = Path("文字稿") / topic / path.name
         if (PROJECT_ROOT / local).exists():
-            task.topic = local.parts[1]
+            task.topic = local.parts[2] if len(local.parts)>3 and local.parts[1]==ORIGINAL else local.parts[1]
             task.output_dir = str(local.parent)
             match = re.search(r'(?:_P|\[P)(\d+)', path.stem, re.IGNORECASE)
             number = int(match.group(1)) if match else index
