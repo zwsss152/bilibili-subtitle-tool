@@ -7,7 +7,7 @@ import queue
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
-from tkinter import ttk, scrolledtext
+from tkinter import ttk, scrolledtext, filedialog
 import urllib.parse
 import webbrowser
 from . import kit as ui
@@ -74,7 +74,7 @@ class BatchApp(tk.Tk):
         return frame
 
     def _build(self):
-        self.status_var = tk.StringVar(value="粘贴 B 站、抖音或机核链接，即可自动生成文字稿")
+        self.status_var = tk.StringVar(value="粘贴平台链接或选择本地视频／音频，即可生成文字稿")
         status = tk.Frame(self, bg="#EFEFF3", pady=7)
         status.pack(side="bottom", fill="x")
         self.label(status, size=9, color=ui.T.text2, textvariable=self.status_var, anchor="w").pack(side="left", padx=18, fill="x", expand=True)
@@ -103,14 +103,15 @@ class BatchApp(tk.Tk):
         new.pack(fill="x", padx=18, pady=(0, 12))
         body = new.body
         body.columnconfigure(1, weight=1)
-        self.label(body, "链接", color=ui.T.text2).grid(row=0, column=0, padx=(0, 12), sticky="w")
+        self.label(body, "链接／文件", color=ui.T.text2).grid(row=0, column=0, padx=(0, 12), sticky="w")
         self.link_var = tk.StringVar()
         self.link_field = ui.TextField(body, textvariable=self.link_var, width=400)
         self.link_field.grid(row=0, column=1, sticky="ew", padx=(0, 10))
         self.link_field.entry.bind("<Return>", lambda e: self.enqueue())
         self.button(body, "加入队列", self.enqueue, "primary").grid(row=0, column=2, sticky="e")
+        self.button(body, "选择文件", self.choose_files).grid(row=0, column=3, sticky="e", padx=(8, 0))
         second = tk.Frame(body, bg=ui.T.surface)
-        second.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        second.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         self.label(second, "归档主题", 9, color=ui.T.text2).pack(side="left", padx=(0, 12))
         self.topic_var = tk.StringVar(value=self.cfg.get("topic") or "未分类")
         self.topic_box = ttk.Combobox(second, textvariable=self.topic_var, width=20)
@@ -203,7 +204,7 @@ class BatchApp(tk.Tk):
         self.reader = TranscriptReader(r)
         self.reader.pack(fill="both", expand=True)
         self.reader.show_message('选择稿件，开始阅读',
-                                 '在左侧加入 B 站、抖音或机核链接，或从上方列表打开已有稿件。')
+                                 '加入平台链接或选择本地视频／音频，或从上方列表打开已有稿件。')
         actions = self.row(r)
         # Reserve the bottom controls before the expanding text viewport.
         actions.pack_configure(side="bottom", before=self.reader, pady=(12, 0))
@@ -238,10 +239,17 @@ class BatchApp(tk.Tk):
         if hasattr(self, "scheduler"):
             self.scheduler.cookie = self.cookie_var.get()
 
-    def enqueue(self):
-        raw = self.link_var.get().strip()
+    def choose_files(self):
+        from ..core.local_media import MEDIA_EXTENSIONS
+        paths = filedialog.askopenfilenames(parent=self, title='选择要转录的视频或音频',
+            filetypes=[('视频和音频', ' '.join('*' + ext for ext in sorted(MEDIA_EXTENSIONS)))])
+        if paths:
+            self.enqueue('\n'.join(paths))
+
+    def enqueue(self, text=None):
+        raw = (text if text is not None else self.link_var.get()).strip()
         if not raw:
-            self.status_var.set("请先粘贴 B 站、抖音或机核链接")
+            self.status_var.set("请粘贴平台链接、本地文件完整路径，或点击选择文件")
             self.link_field.focus_set()
             return
         engine = 'cloud' if self.engine_var.get() == '在线' else 'local'
@@ -252,11 +260,12 @@ class BatchApp(tk.Tk):
             return
         added, duplicates, errors = self.scheduler.enqueue(raw, self.topic_var.get(), self.cookie_var.get(), engine)
         if added:
-            self.link_var.set("")
+            if text is None:
+                self.link_var.set("")
             self._save_settings()
             self.status_var.set(f"已加入 {added} 条，主题：{sanitize_filename(self.topic_var.get() or '未分类')}" + (f"；重复 {duplicates} 条" if duplicates else ""))
         else:
-            self.status_var.set("；".join(errors) or ("链接已在队列中" if duplicates else "未识别到有效链接，仅支持 B 站、抖音与机核电台"))
+            self.status_var.set("；".join(errors) or ("内容已在队列中" if duplicates else "未识别到有效链接或本地媒体文件"))
         self.refresh_library()
 
     def toggle_pause(self):
@@ -492,7 +501,13 @@ class BatchApp(tk.Tk):
     def open_source(self):
         if self.document:
             url = self.document["url"]
-            if urllib.parse.urlsplit(url).hostname in ("www.bilibili.com", "bilibili.com", "b23.tv", "www.gcores.com", "gcores.com", 'www.douyin.com', 'douyin.com', 'v.douyin.com'):
+            if urllib.parse.urlsplit(url).scheme == 'file':
+                from ..core.local_media import media_path
+                try:
+                    os.startfile(str(media_path(url)))
+                except (OSError, ValueError) as exc:
+                    self.status_var.set(str(exc))
+            elif urllib.parse.urlsplit(url).hostname in ("www.bilibili.com", "bilibili.com", "b23.tv", "www.gcores.com", "gcores.com", 'www.douyin.com', 'douyin.com', 'v.douyin.com'):
                 webbrowser.open(url)
             else:
                 self.status_var.set("稿件中没有受支持的来源链接")

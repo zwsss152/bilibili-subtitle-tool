@@ -5,6 +5,8 @@ import urllib.request
 from dataclasses import dataclass
 from .bilibili import parse_video_id
 from .net import UA_HEADERS, check_cancel
+from .local_media import media_path
+import os
 
 URL_RE = re.compile(r"https?://[^\s，。；;\"'<>）)】]+", re.I)
 
@@ -22,6 +24,9 @@ class Source:
 
 
 def parse_source(raw):
+    if raw.strip().strip('"').lower().startswith('file:') or re.match(r'^(?:[A-Za-z]:[\\/]|/|\\\\)', raw.strip().strip('"')):
+        path = media_path(raw)
+        return Source('local', os.path.normcase(str(path)), path.as_uri())
     raw = raw.strip().rstrip(".,，。；;")
     if raw.startswith(("https://", "http://")):
         parsed = urllib.parse.urlsplit(raw)
@@ -43,7 +48,7 @@ def parse_source(raw):
                 return Source("gcores", match[1], f"https://www.gcores.com/radios/{match[1]}")
             raise ValueError("请输入机核电台节目链接（/radios/编号）")
         if host not in ("bilibili.com", "www.bilibili.com", "m.bilibili.com"):
-            raise ValueError("仅支持 B 站、抖音和机核电台")
+            raise ValueError("仅支持 B 站、抖音、机核或本地视频／音频文件")
         query = urllib.parse.parse_qs(parsed.query)
         page = query.get("p", [None])[0]
         if page is not None and (not page.isdigit() or int(page) < 1):
@@ -55,9 +60,18 @@ def parse_source(raw):
 
 
 def extract_sources(text):
+    local_tokens, other_lines = [], []
+    for line in text.splitlines():
+        value = line.strip().strip('"')
+        if value.lower().startswith('file:') or re.match(r'^(?:[A-Za-z]:[\\/]|/|\\\\)', value):
+            local_tokens.append(line)
+        else:
+            other_lines.append(line)
+    text = '\n'.join(other_lines)
     tokens = URL_RE.findall(text)
     remainder = URL_RE.sub(" ", text)
     tokens.extend(re.findall(r"\bBV[0-9A-Za-z]{10}\b|\bav\d{1,12}\b", remainder, re.I))
+    tokens.extend(local_tokens)
     if not tokens and text.strip().isdigit():
         tokens = [text.strip()]
     sources, rejected = [], []
