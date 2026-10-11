@@ -20,6 +20,7 @@ from .reading_service import ReadingService
 from ..core.editor_model import LocalEditor
 from ..core.cloud import CloudClient, configured, checkpoint_path, discard_checkpoints
 from ..core.library import reading_path
+from ..core.local_media import inspect_media
 
 
 class Scheduler:
@@ -214,7 +215,7 @@ class Scheduler:
     def retry(self, identities):
         with self.lock:
             for job in self.jobs:
-                if job.jid in identities and job.kind in ("bilibili", "gcores", 'douyin'):
+                if job.jid in identities and job.kind in ("bilibili", "gcores", 'douyin', 'local'):
                     job.error = ""
                     for page in job.pages:
                         if page.status == "失败":
@@ -302,6 +303,11 @@ class Scheduler:
             job._info = info
             title = info["title"]
             ref = "bvid:" + info["bvid"]
+        elif job.kind == 'local':
+            info = inspect_media(source.ref)
+            title, ref = info['title'], source.ref
+            new_pages = [Page(1, title, info['url'], info['duration'])]
+            job._info = info
         elif job.kind == 'douyin':
             info = douyin.fetch_douyin_video(source.ref, lambda: self._cancelled(job),
                                            lambda msg: self._change(job, detail=msg))
@@ -323,6 +329,10 @@ class Scheduler:
         self._persist()
 
     def _ensure_info(self, job):
+        if job.kind == 'local':
+            # Recheck the original on each preparation/retry; never use a stale path.
+            job._info = inspect_media(job.ref)
+            return job._info
         if hasattr(job, "_info"):
             return job._info
         if job.kind == "bilibili":
@@ -339,7 +349,7 @@ class Scheduler:
         with self.lock:
             check_cancel(lambda: self._cancelled(job))
             txt, raw = save_result(resolve_owned(job.output_dir), page.title, page.url,
-                                  {'bilibili': 'B站', 'gcores': '机核', 'douyin': '抖音'}[job.kind], method, segments,
+                                  {'bilibili': 'B站', 'gcores': '机核', 'douyin': '抖音', 'local': '本地文件'}[job.kind], method, segments,
                                   f"{job.jid[:8]}_p{page.number}", metadata, self.log)
             page.txt, page.raw = relative(txt), relative(raw)
             page.reading = relative(reading_path(txt))
@@ -382,13 +392,15 @@ class Scheduler:
                 check_cancel(cancel)
             acquired = True
             check_cancel(cancel)
-            self._change(job, page, "下载中", "下载音频", 0, True)
+            self._change(job, page, "下载中", "读取本地媒体" if job.kind == 'local' else "下载音频", 0, True)
             progress = lambda msg, pct=None: self._change(job, page, detail=msg, pct=pct)
             last_error = None
             for attempt in range(2):
                 check_cancel(cancel)
                 try:
-                    if job.kind == "gcores":
+                    if job.kind == 'local':
+                        audio = info['path']
+                    elif job.kind == "gcores":
                         audio = download_direct_audio(info["audio_url"], directory / "audio.mp3", progress, cancel=cancel)
                     elif job.kind == 'douyin' and info.get('media_url'):
                         audio = download_direct_audio(info['media_url'], directory / 'audio.mp4', progress, cancel=cancel)
@@ -404,7 +416,7 @@ class Scheduler:
             if last_error:
                 raise last_error
             check_cancel(cancel)
-            self._change(job, page, "等待识别", "音频已下载，等待识别", 0, True)
+            self._change(job, page, "等待识别", "本地媒体已就绪，等待识别" if job.kind == 'local' else "音频已下载，等待识别", 0, True)
             self.ready.put((job, page, audio, directory))
             acquired = False  # recognition thread releases the prefetch slot
         finally:
