@@ -4,19 +4,17 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = PROJECT_ROOT / "文字稿"
 RECORDS_DIR = PROJECT_ROOT / '.data' / 'transcripts'
-MODELS_DIR = PROJECT_ROOT / "models"
 ASR_CACHE_DIR = PROJECT_ROOT / "asr_cache"
 ASSETS_DIR = PROJECT_ROOT / "assets"
 APP_ICON = ASSETS_DIR / "视频列表.ico"
 CONFIG_PATH = PROJECT_ROOT / "app_config.json"
 QUEUE_STATE_PATH = PROJECT_ROOT / "queue_state.json"
 LOGS_DIR = PROJECT_ROOT / "logs"
-PROFILE_PATH = PROJECT_ROOT / "recognition_profile.json"
 
 
 def initialize():
     from .core.library import ORIGINAL, READING
-    for directory in (OUTPUT_ROOT / ORIGINAL, OUTPUT_ROOT / READING, RECORDS_DIR, MODELS_DIR, ASR_CACHE_DIR, LOGS_DIR):
+    for directory in (OUTPUT_ROOT / ORIGINAL, OUTPUT_ROOT / READING, RECORDS_DIR, ASR_CACHE_DIR, LOGS_DIR):
         directory.mkdir(parents=True, exist_ok=True)
 
 

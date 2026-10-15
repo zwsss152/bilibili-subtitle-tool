@@ -34,7 +34,7 @@ def main():
         for target in (documents, rename):
             stack.enter_context(patch.object(target, 'RECORDS_DIR', root / 'records'))
         stack.enter_context(patch.object(module, 'create_topic', lambda name: topics.create_topic(name, output)))
-        stack.enter_context(patch.object(module, 'load_config', lambda: dict(topic='阅读验收', geometry='1180x820+30+30')))
+        stack.enter_context(patch.object(module, 'load_config', lambda: dict(topic='阅读验收', geometry='1180x820+30+30', engine='cloud')))
         stack.enter_context(patch.object(module, 'save_config', lambda **values: None))
         stack.enter_context(patch.object(module, 'Scheduler', lambda **kwargs: Scheduler(state_path=root / 'queue.json', autostart=False)))
         app = module.BatchApp(autostart=False, demo_scale=1.0)
@@ -92,13 +92,9 @@ def main():
                 app.after(200, save)
                 app.mainloop()
 
-            assert app.engine_var.get() == '本地'
-            assert tuple(app.engine_box['values']) == ('本地','在线')
-            app.engine_box.set('在线')
-            app.engine_box.event_generate('<<ComboboxSelected>>')
-            app.update()
-            assert '只影响新' in app.status_var.get()
-            capture('dual-mode-online.jpg')
+            assert app.cfg.get('engine') == 'cloud'
+            assert not hasattr(app, 'engine_box')
+            capture('cloud-desktop.jpg')
             app.settings()
             app.update()
             import tkinter as tk
@@ -107,8 +103,6 @@ def main():
             app.after(400,app.quit)
             app.mainloop()
             settings.destroy()
-            app.engine_box.set('本地')
-            app.engine_box.event_generate('<<ComboboxSelected>>')
 
             app.copy_all()
             original_copy = app.clipboard_get()

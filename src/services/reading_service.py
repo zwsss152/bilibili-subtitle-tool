@@ -1,4 +1,4 @@
-"""Resumable text service driven by the scheduler's exclusive GPU dispatcher."""
+"""Resumable cloud editing driven by the scheduler's serial dispatcher."""
 import hashlib
 import os
 from pathlib import Path
@@ -10,11 +10,12 @@ from ..config import atomic_json
 from ..core import reading
 from ..core.documents import record_path
 from ..core.library import originals, reading_path
-from ..core.editor_model import resources_ready
-from ..core.editor_model import MODEL_NAME, MODEL_REVISION
+from ..core.cloud import EDITOR_MODEL as MODEL_NAME
 from ..core.cloud import configured
 from ..core.net import JobCancelled, check_cancel
 from ..core.textout import read_document
+
+MODEL_REVISION = 'bailian-http-v1'
 
 
 class ReadingService:
@@ -44,18 +45,22 @@ class ReadingService:
                     status = state.get('status', page.reading_status)
                     unfinished = status in ('待整理','写入中') or status.startswith('整理中')
                     requested = page.reading_requested or (document.get('raw') or {}).get('reading_requested', False)
-                    if requested and unfinished:
+                    if requested and unfinished and (job.engine == 'cloud' or (document.get('raw') or {}).get('reading_engine') == 'cloud'):
                         self.enqueue((job.jid, page.number), historical=True)
         for path in originals():
             if path.resolve() not in owned:
                 document = read_document(path)
                 raw = document.get('raw') or {}
                 status = (raw.get('reading') or {}).get('status','')
-                if raw.get('reading_requested') and (status in ('待整理','写入中') or status.startswith('整理中')):
+                cloud_request = (raw.get('reading_engine') == 'cloud'
+                                 or (raw.get('recognition') or {}).get('engine') == 'cloud')
+                if cloud_request and raw.get('reading_requested') and (status in ('待整理','写入中') or status.startswith('整理中')):
                     self.enqueue(str(path.resolve()), historical=True)
 
     def request(self, path):
         """Persist one explicit request; never enqueue other documents."""
+        if not configured():
+            raise RuntimeError('请先在设置中填写百炼 API Key，再整理')
         path = Path(path).resolve()
         from ..core.library import ORIGINAL
         if not path.is_relative_to((OUTPUT_ROOT / ORIGINAL).resolve()) or not path.is_file():
@@ -74,6 +79,7 @@ class ReadingService:
                 if key in self.keys:
                     return False
             raw['reading_requested'] = True
+            raw['reading_engine'] = 'cloud'
             if progress.get('status') not in ('写入中', '整理中'):
                 progress['status'] = '待整理'
             raw['reading'] = progress
@@ -118,14 +124,9 @@ class ReadingService:
                 path, job, page = self._resolve(key)
                 check_cancel(cancel)
                 document = read_document(path)
-                engine = job.engine if job else ((document['raw'] or {}).get('recognition') or {}).get('engine','local')
-                if engine == 'cloud':
-                    if not configured():
-                        raise RuntimeError('在线整理尚未配置，请在设置中填写百炼 API Key')
-                    editor = self.scheduler.cloud_editor
-                    strategy = 'cloud'
-                else:
-                    strategy = 'local' if reading.enabled() and resources_ready() else 'layout'
+                if not configured():
+                    raise RuntimeError('在线整理尚未配置，请在设置中填写百炼 API Key')
+                strategy = 'cloud'
                 record = reading.initial_record(document, strategy)
                 progress = record['reading']
                 destination = reading_path(path)
@@ -143,31 +144,14 @@ class ReadingService:
                 source_hash = progress['source_hash']
                 if page:
                     page.reading_status = f'整理中 {len(blocks)}/{len(units)}'
-            if strategy in ('local', 'cloud'):
-                batch = reading.chunks(units[len(blocks):])[0] if len(blocks) < len(units) else []
-                try:
-                    if batch:
-                        editor.start(cancel)
-                        progress.update(model=getattr(editor,'model_name',MODEL_NAME),
-                                        model_revision=getattr(editor,'model_revision',MODEL_REVISION),
-                                        runtime='百炼 HTTP' if strategy == 'cloud' else 'llama.cpp b11146',
-                                        device=getattr(editor,'device','unknown'))
-                    context = units[len(blocks)-1]['text'][-300:] if blocks else ''
-                    additions = reading.organize_chunk(batch, editor, context, cancel) if batch else []
-                except JobCancelled:
-                    raise
-                except Exception as exc:
-                    check_cancel(cancel)
-                    editor.close()
-                    if strategy == 'cloud':
-                        raise
-                    progress['model_error'] = str(exc)
-                    additions = [dict(**u, heading='', mode='原文排版', reason=f'本地模型不可用：{exc}')
-                                 for u in units[len(blocks):]]
-                    self.scheduler.log(f'本地整理不可用，保留原文排版：{type(exc).__name__}: {exc}')
-            else:
-                additions = [dict(**u, heading='', mode='原文排版', reason='本地整理尚未通过验收或模型不可用')
-                             for u in units[len(blocks):]]
+            batch = reading.chunks(units[len(blocks):])[0] if len(blocks) < len(units) else []
+            if batch:
+                editor.start(cancel)
+                progress.update(model=getattr(editor, 'model_name', MODEL_NAME),
+                                model_revision=getattr(editor, 'model_revision', MODEL_REVISION),
+                                runtime='百炼 HTTP', device='cloud')
+            context = units[len(blocks)-1]['text'][-300:] if blocks else ''
+            additions = reading.organize_chunk(batch, editor, context, cancel) if batch else []
             check_cancel(cancel)
             with self.scheduler.persist_lock, self.scheduler.lock:
                 current_path, job, page = self._resolve(key)
@@ -192,7 +176,7 @@ class ReadingService:
                     if destination.exists() and hashlib.sha256(destination.read_bytes()).hexdigest() not in owned_hashes:
                         raise ValueError('阅读稿已存在或被外部修改，已保留，未覆盖')
                     fallback = sum(b['mode'] == '原文排版' for b in blocks)
-                    prefix = '在线' if strategy == 'cloud' else '本地'
+                    prefix = '在线'
                     label = prefix + '完整书面稿' if not fallback else '保留原文排版' if fallback == len(blocks) else prefix + '完整书面稿（部分段落保留原文）'
                     content = reading.render_reading(current, blocks, label).encode('utf-8')
                     progress.update(status='写入中', pending_file_hash=hashlib.sha256(content).hexdigest())
@@ -239,6 +223,7 @@ class ReadingService:
                     except OSError:
                         self.scheduler.log('整理失败状态未能保存，请检查磁盘')
                 self.scheduler._persist()
+            editor.close()
             self.scheduler.log(f'阅读稿整理失败：{type(exc).__name__}: {exc}')
             finished = True
         finally:

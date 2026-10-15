@@ -165,14 +165,13 @@ class CloudTests(unittest.TestCase):
         self.assertEqual(client.calls,2)
         self.assertFalse((self.root/'state.json').exists())
 
-    def test_mode_is_captured_and_restored_per_task(self):
+    def test_only_cloud_tasks_can_be_created_and_restored(self):
         scheduler=Scheduler(state_path=self.root/'queue.json',autostart=False)
-        scheduler.enqueue('BV17x411w7KC','主题','','local')
+        self.assertEqual(scheduler.enqueue('BV17x411w7KC','主题','','local')[0],0)
         with patch('src.services.scheduler.configured',return_value=True):
             scheduler.enqueue('BV17x411w7KC','主题','','cloud')
-        self.assertEqual([j.engine for j in scheduler.jobs],['local','cloud'])
         restored=Scheduler(state_path=self.root/'queue.json',autostart=False)
-        self.assertEqual([j.engine for j in restored.jobs],['local','cloud'])
+        self.assertEqual([j.engine for j in restored.jobs],['cloud'])
         legacy=scheduler.jobs[0].to_dict();legacy.pop('engine')
         self.assertEqual(Task.from_dict(legacy).engine,'local')
 

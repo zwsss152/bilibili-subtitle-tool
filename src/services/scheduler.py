@@ -17,7 +17,6 @@ from ..core import rename as document_rename
 from .tasks import Task, Page, migrate_legacy
 from .recognizer import worker
 from .reading_service import ReadingService
-from ..core.editor_model import LocalEditor
 from ..core.cloud import CloudClient, configured, checkpoint_path, discard_checkpoints
 from ..core.library import reading_path
 from ..core.local_media import inspect_media
@@ -62,6 +61,19 @@ class Scheduler:
                     shutil.copy2(self.state_path, backup)
                 self.log(f'跳过异常任务记录，原记录已备份至 {backup.name}')
         for job in self.jobs:
+            if job.engine == 'local':
+                # Preserve prior upload intent: require an explicit retry.
+                message = '本地模型已移除；点击重试将未完成部分转为在线处理'
+                for page in job.pages:
+                    if page.status != '完成':
+                        page.status, page.error = '失败', message
+                    if page.reading_requested and page.reading_status != '完成':
+                        page.reading_requested = False
+                        page.reading_status = '未整理'
+                job.update_status()
+                if not job.pages:
+                    job.status, job.error = '失败', message
+                job.detail = message
             for page in job.pages:
                 if page.txt and record_path(PROJECT_ROOT / page.txt).exists():
                     page.raw = relative(record_path(PROJECT_ROOT / page.txt))
@@ -73,7 +85,6 @@ class Scheduler:
                         # Actual file operations still enforce their owned roots.
                         pass
         self.reading_service = ReadingService(self)
-        self.editor = LocalEditor()
         self.cloud_editor = CloudClient()
         self.process_engine = None
         if autostart:
@@ -84,7 +95,7 @@ class Scheduler:
 
     def start(self):
         cleanup_stale_cache(self.log)
-        # GPU models are loaded on demand; only one GPU stage owns a model.
+        # Cloud requests share the serial dispatcher for predictable usage.
         self.reading_service.scan()
         for target in (self._network_loop, self._recognition_loop):
             thread = threading.Thread(target=target, daemon=True)
@@ -93,7 +104,7 @@ class Scheduler:
         if self.jobs:
             self.log(f"恢复队列 {len(self.jobs)} 条；已完成的分 P 不会重复处理")
 
-    def _start_process(self, engine='local'):
+    def _start_process(self, engine='cloud'):
         self.inputs = self.context.Queue()
         self.outputs = self.context.Queue()
         self.cancel_signal.clear()
@@ -125,8 +136,10 @@ class Scheduler:
         with self.lock:
             return [{**job.to_dict(), "progress": job.progress} for job in self.jobs]
 
-    def enqueue(self, text, topic, cookie, engine='local'):
-        if engine == 'cloud' and not configured():
+    def enqueue(self, text, topic, cookie, engine='cloud'):
+        if engine != 'cloud':
+            return 0, 0, ['本地模型已移除，请使用在线方式']
+        if not configured():
             return 0, 0, ['请先在设置中填写阿里云百炼 API Key，再使用在线方式']
         sources, rejected = extract_sources(text)
         added, duplicates = 0, 0
@@ -216,6 +229,10 @@ class Scheduler:
         with self.lock:
             for job in self.jobs:
                 if job.jid in identities and job.kind in ("bilibili", "gcores", 'douyin', 'local'):
+                    if not configured():
+                        job.detail = '请先在设置中填写百炼 API Key，再重试'
+                        continue
+                    job.engine = 'cloud'
                     job.error = ""
                     for page in job.pages:
                         if page.status == "失败":
@@ -367,26 +384,10 @@ class Scheduler:
         cancel = lambda: self._cancelled(job)
         check_cancel(cancel)
         info = self._ensure_info(job)
-        if job.kind == "bilibili" and job.engine == 'local':
-            cid = next(p["cid"] for p in info["pages"] if p["page"] == page.number)
-            try:
-                subtitles = bilibili.fetch_subtitle_list(info["bvid"], cid, self.cookie)
-                chosen = next((s for s in subtitles if "zh" in s.get("lan", "").lower()), None)
-                if chosen:
-                    items = bilibili.download_subtitle(chosen["subtitle_url"], self.cookie)
-                    segments = [dict(start=a, end=b, text=t) for a, b, t in items]
-                    check_cancel(cancel)
-                    # Automatic captions are reference material, not a reliable
-                    # substitute for audio. Retain uploader-authored captions.
-                    if not chosen.get('ai_status') and not chosen.get('lan','').startswith('ai-'):
-                        self._save(job, page, segments, f"CC字幕（{chosen.get('lan', '')}）", {'engine':'local'})
-                        return
-            except JobCancelled:
-                raise
-            except Exception as exc:
-                self.log(f"字幕提取失败，改为音频识别（{type(exc).__name__}）")
-        acquired = False
+        if job.engine != 'cloud':
+            raise ValueError('本地模型已移除，请点击重试转为在线处理')
         directory = ASR_CACHE_DIR / f"job_{job.jid}" / f"p{page.number}"
+        acquired = False
         try:
             while not self.slots.acquire(timeout=0.1):
                 check_cancel(cancel)
@@ -451,16 +452,15 @@ class Scheduler:
                 if self.reading_service.has_work(allow_history=not active):
                     if self.process:
                         self._terminate_process()
-                    self.reading_service.step(self.editor, allow_history=not active)
-                elif self.editor.process:
-                    self.editor.close()
+                    self.reading_service.step(self.cloud_editor, allow_history=not active)
+                else:
+                    self.cloud_editor.close()
                 continue
             self.slots.release()
             if self._cancelled(job):
                 self._cleanup(directory)
                 continue
             identity = job.jid, page.number
-            self.editor.close()
             self.cloud_editor.close()
             if self.process and self.process_engine != job.engine:
                 self._terminate_process()
@@ -468,7 +468,7 @@ class Scheduler:
                 self._start_process(job.engine)
             self.current = identity
             self.cancel_signal.clear()
-            self._change(job, page, "识别中", "在线语音识别" if job.engine == 'cloud' else "本地语音识别", 0, True)
+            self._change(job, page, "识别中", "在线语音识别", 0, True)
             checkpoint = checkpoint_path(job.jid, page.number)
             context = job.title
             if job.engine == 'cloud':
@@ -503,8 +503,7 @@ class Scheduler:
                         self._change(job, page, pct=value[0], detail=value[1])
                     elif event == "result":
                         recognition = value['recognition']
-                        reviewed = (recognition.get('chinese_review') or {}).get('available')
-                        method = ('在线' if job.engine == 'cloud' else '本地') + f"语音识别（{recognition['model']}" + (' + 中文语音复核）' if reviewed else '）')
+                        method = f"在线语音识别（{recognition['model']}）"
                         self._save(job, page, value["segments"], method, recognition)
                         break
                     elif event == "cancelled":
@@ -539,7 +538,6 @@ class Scheduler:
     def shutdown(self):
         self.stopping.set()
         self.cancel_signal.set()
-        self.editor.close()
         self.cloud_editor.close()
         self._persist()
         for thread in self._threads:

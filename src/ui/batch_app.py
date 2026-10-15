@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 import queue
-import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, scrolledtext, filedialog
@@ -38,7 +37,6 @@ class BatchApp(tk.Tk):
             self.iconbitmap(str(APP_ICON))
         self.document, self.documents, self.row_times = None, [], {}
         self.pending = queue.Queue()
-        self.model_cancel = threading.Event()
         self.closing = False
         self._style()
         self._build()
@@ -94,10 +92,7 @@ class BatchApp(tk.Tk):
         header.bind('<Configure>', header_layout)
         self.button(header, "设置", self.settings).pack(side="right")
         self.button(header, "运行日志", self.toggle_logs).pack(side="right", padx=8)
-        self.engine_var = tk.StringVar(value='在线' if self.cfg.get('engine') == 'cloud' else '本地')
-        self.engine_box = ttk.Combobox(header, textvariable=self.engine_var, values=('本地','在线'), state='readonly', width=7)
-        self.engine_box.pack(side='right', padx=8)
-        self.engine_box.bind('<<ComboboxSelected>>', self.change_engine)
+        self.label(header, '云端识别与整理', color=ui.T.text2).pack(side='right', padx=8)
 
         new = ui.Card(self, pad=16, border_color=ui.T.border_card)
         new.pack(fill="x", padx=18, pady=(0, 12))
@@ -235,7 +230,7 @@ class BatchApp(tk.Tk):
 
     def _save_settings(self):
         save_config(topic=self.topic_var.get(), cookie=self.cookie_var.get(), geometry=self.geometry(), show_logs=self.logs_visible,
-                    engine='cloud' if self.engine_var.get() == '在线' else 'local')
+                    engine='cloud')
         if hasattr(self, "scheduler"):
             self.scheduler.cookie = self.cookie_var.get()
 
@@ -252,7 +247,7 @@ class BatchApp(tk.Tk):
             self.status_var.set("请粘贴平台链接、本地文件完整路径，或点击选择文件")
             self.link_field.focus_set()
             return
-        engine = 'cloud' if self.engine_var.get() == '在线' else 'local'
+        engine = 'cloud'
         from ..core.cloud import configured
         if engine == 'cloud' and not configured():
             self.status_var.set('请先填写百炼 API Key；输入一次即可自动使用在线方式')
@@ -560,7 +555,7 @@ class BatchApp(tk.Tk):
         if selected:
             job = next((j for j in jobs if j["jid"] == selected[0]), None)
             if job:
-                self.task_detail.set(f"主题：{job['topic']} · {'在线' if job.get('engine') == 'cloud' else '本地'}\n{job['detail'] or job['error'] or job['status']}")
+                self.task_detail.set(f"主题：{job['topic']} · {'在线' if job.get('engine') == 'cloud' else '旧本地任务（重试转在线）'}\n{job['detail'] or job['error'] or job['status']}")
         while True:
             try:
                 event, message = self.scheduler.events.get_nowait()
@@ -583,10 +578,6 @@ class BatchApp(tk.Tk):
             except (OSError, ValueError):
                 pass
         self.after(250, self._refresh)
-
-    def change_engine(self, event=None):
-        self._save_settings()
-        self.status_var.set(f'{self.engine_var.get()}识别与整理；切换只影响新加入的任务')
 
     def settings(self):
         from ..core import cloud
@@ -622,26 +613,11 @@ class BatchApp(tk.Tk):
                     cloud.save_credentials(key.get(), workspace.get())
                 key.set('')
                 self._save_settings()
-                self.status_var.set('设置已保存；本地／在线切换只影响新任务')
+                self.status_var.set('设置已保存；识别和整理均使用百炼云端')
                 window.destroy()
             except (OSError, ValueError, RuntimeError) as exc:
                 error.set(str(exc))
         self.button(body, "保存设置", save, "primary").pack(anchor="e")
-
-    def download_punctuation(self):
-        if getattr(self, "model_thread", None) and self.model_thread.is_alive():
-            self.status_var.set("模型正在下载，请查看运行日志")
-            return
-        self.model_cancel.clear()
-        def run():
-            try:
-                from ..core.models import ensure_punctuation
-                ensure_punctuation(lambda message, pct=None: self.pending.put(message), self.model_cancel.is_set)
-                self.pending.put("本地标点模型已就绪")
-            except Exception as exc:
-                self.pending.put(f"模型下载未完成（{type(exc).__name__}），可重新下载续传")
-        self.model_thread = threading.Thread(target=run, daemon=True)
-        self.model_thread.start()
 
     def report_callback_exception(self, exc_type, exc, traceback):
         logging.getLogger("transcripts").error("界面操作失败", exc_info=(exc_type, exc, traceback))
@@ -652,7 +628,6 @@ class BatchApp(tk.Tk):
             return
         self._save_settings()
         self.closing = True
-        self.model_cancel.set()
         self.status_var.set("正在保存进度并停止后台识别与整理…")
         self.update_idletasks()
         self.scheduler.shutdown()

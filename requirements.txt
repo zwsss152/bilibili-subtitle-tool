@@ -1,13 +1,8 @@
-# Python 3.13 / Windows x64; validated runtime versions.
+# Cloud-only Windows desktop runtime; no GPU or model packages.
 Pillow==12.3.0
 pypinyin==0.55.0
 yt-dlp==2026.8.19
 pywebview==6.2.1
-faster-whisper==1.2.1
 av==18.1.0
-ctranslate2==4.8.2
 imageio-ffmpeg==0.6.0
 opencc-python-reimplemented==0.1.7
-sherpa-onnx==1.13.8
-nvidia-cublas-cu12==12.9.2.10
-nvidia-cudnn-cu12==9.27.0.42

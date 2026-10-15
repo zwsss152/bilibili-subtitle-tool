@@ -6,7 +6,7 @@ import threading
 import unittest
 import uuid
 from unittest.mock import patch
-from src.core import asr, download, textout, models
+from src.core import download, textout
 from src.core.links import parse_source, extract_sources, resolve_source
 from src.core.net import JobCancelled
 from src.services.tasks import Task, Page
@@ -27,6 +27,10 @@ class Response(io.BytesIO):
 
 
 class RegressionTests(unittest.TestCase):
+    def setUp(self):
+        configured = patch('src.services.scheduler.configured', return_value=True)
+        configured.start(); self.addCleanup(configured.stop)
+
     @classmethod
     def setUpClass(cls):
         cls.directory = PROJECT_ROOT / "tests" / ".artifacts"
@@ -57,12 +61,6 @@ class RegressionTests(unittest.TestCase):
                           '天气很好我们准备去旅行看看远处的山和海。'):
             self.assertEqual(chinese_review.choose_reading(original, candidate)[0], original)
 
-    def test_chinese_review_failure_keeps_initial_transcript(self):
-        original = [dict(start=1, end=4, text='这是已有的识别结果。')]
-        with patch.object(chinese_review, 'engine', side_effect=RuntimeError('model failed')):
-            output, info = chinese_review.review('unused', original)
-        self.assertEqual(output, original)
-        self.assertFalse(info['available'])
 
     def test_chinese_review_does_not_import_fillers_or_rewrite_meaning(self):
         original = '被裁员之后就出去捋了个油，然后回来上班。'
@@ -72,10 +70,6 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(chinese_review.choose_reading('我们准备出去研究游戏行业。', '我们准备出去改造游戏行业。')[0],
                          '我们准备出去研究游戏行业。')
 
-    def test_chinese_review_cancel_does_not_report_success(self):
-        with patch.object(chinese_review, 'engine', side_effect=JobCancelled()):
-            with self.assertRaises(JobCancelled):
-                chinese_review.review('unused', [])
 
     def test_numbers_and_intentional_repetitions_survive(self):
         for value in ("预算100000元", "编号AAAAA", "非常非常非常非常", "哈哈哈哈哈"):
@@ -90,15 +84,8 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(textout.add_punctuation("这是测试", punctuator=lambda s: "这是测试。"), "这是测试。")
 
     def test_missing_punctuation_model_falls_back(self):
-        with patch.object(textout, "PUNCTUATION_PATH", self.directory / "nonexistent.onnx"):
-            self.assertEqual(textout.add_punctuation("这是一段没有标点的内容"), "这是一段没有标点的内容")
+        self.assertEqual(textout.add_punctuation("这是一段没有标点的内容"), "这是一段没有标点的内容")
 
-    @unittest.skipUnless(textout.PUNCTUATION_PATH.is_file(), 'Local punctuation model not installed')
-    def test_real_punctuation_preserves_digits_and_words(self):
-        value = '我们预算100000元今天讨论人工智能明天讨论游戏开发'
-        result = textout.add_punctuation(value)
-        self.assertEqual(textout.content_key(result), value)
-        self.assertRegex(result, '[，。！？]')
 
     def test_corrupt_queue_is_backed_up_before_new_state(self):
         state = self.directory / f'corrupt-{uuid.uuid4().hex}.json'
@@ -202,20 +189,16 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual([j.topic for j in scheduler.jobs], ["主题一", "主题二"])
         self.assertEqual(scheduler.jobs[0].output_dir, str(Path("文字稿") / "时间戳原稿" / "主题一"))
 
-    def test_chinese_subtitle_is_preferred_and_cookie_is_forwarded(self):
+    def test_cloud_uses_audio_instead_of_fetching_subtitles(self):
         from src.services import scheduler as module
-        scheduler = Scheduler(cookie='test-cookie', state_path=self.directory/f'cc-{uuid.uuid4().hex}.json',autostart=False)
-        job = Task.create(parse_source('BV17x411w7KC'),'测试')
-        page = Page(1,'测试','https://www.bilibili.com/video/BV17x411w7KC?p=1')
-        job.pages=[page]
-        scheduler.jobs=[job]
-        info=dict(bvid='BV17x411w7KC',pages=[dict(page=1,cid=123)])
-        with patch.object(scheduler,'_ensure_info',return_value=info), patch.object(module.bilibili,'fetch_subtitle_list',return_value=[dict(lan='zh-CN',subtitle_url='url')]) as listing, patch.object(module.bilibili,'download_subtitle',return_value=[(0,1,'预算100000元')]) as subtitle, patch.object(module,'download_audio') as audio, patch.object(scheduler,'_save') as save:
+        scheduler = Scheduler(cookie='cookie', state_path=self.directory/'cloud-audio.json', autostart=False)
+        job=Task.create(parse_source('BV17x411w7KC'),'测试')
+        page=Page(1,'测试','https://www.bilibili.com/video/BV17x411w7KC')
+        with patch.object(scheduler,'_ensure_info',return_value={}), patch.object(module.bilibili,'fetch_subtitle_list') as listing, patch.object(module,'download_audio',return_value='audio.m4a') as audio:
             scheduler._prepare(job,page)
-        listing.assert_called_once_with('BV17x411w7KC',123,'test-cookie')
-        subtitle.assert_called_once_with('url','test-cookie')
-        audio.assert_not_called()
-        self.assertEqual(save.call_args.args[2][0]['text'],'预算100000元')
+        listing.assert_not_called()
+        self.assertEqual(audio.call_args.kwargs['cookie'], 'cookie')
+        self.assertEqual(page.status, '等待识别')
 
     def test_no_subtitle_passes_cookie_to_audio_download(self):
         from src.services import scheduler as module
@@ -292,51 +275,7 @@ class RegressionTests(unittest.TestCase):
         with self.assertRaises(JobCancelled):
             download.download_audio("https://example.invalid", "audio", self.directory, lambda *a: None, cancel=lambda: True)
 
-    def test_model_download_resume_and_cancel_keep_partial(self):
-        target = self.directory / f'model-{uuid.uuid4().hex}.bin'
-        partial = target.with_name(target.name+'.part')
-        partial.write_bytes(b'abc')
-        requests = []
-        def response(request, **kw):
-            requests.append(request)
-            return Response(b'def',206,{'Content-Length':'3','Content-Range':'bytes 3-5/6'})
-        with patch('urllib.request.urlopen', side_effect=response):
-            models.download_file('https://example.invalid/model',target,expected_size=6)
-        self.assertEqual(target.read_bytes(),b'abcdef')
-        self.assertEqual(requests[0].get_header('Range'),'bytes=3-')
-        partial.write_bytes(b'abc')
-        with self.assertRaises(JobCancelled):
-            models.download_file('https://example.invalid/model',target,cancel=lambda:True)
-        self.assertEqual(partial.read_bytes(),b'abc')
 
-    def test_gpu_fallback_reports_actual_cpu(self):
-        fake_info = type("Info", (), {"duration": 1, "language": "zh"})()
-        fake_segment = type("Segment", (), dict(start=0, end=1, text="测试", avg_logprob=-0.1, no_speech_prob=0))()
-        class FakeModel:
-            def transcribe(self, *a, **k):
-                return iter([fake_segment]), fake_info
-        def load(*args, **kwargs):
-            if kwargs["device"] == "cuda":
-                raise RuntimeError("GPU unavailable")
-            return FakeModel()
-        with patch.object(asr, "model_is_ready", return_value=True), patch.object(asr, "get_asr_model", side_effect=load):
-            result = asr.transcribe("unused", dict(model="medium", device="cuda", compute_type="float16", batch_size=8, beam_size=3))
-        self.assertEqual(result["recognition"]["device"], "cpu")
-
-    def test_oom_halves_batch_before_cpu_fallback(self):
-        seen = []
-        fake_info = type("Info", (), {"duration": 1, "language": "zh"})()
-        fake_segment = type("Segment", (), dict(start=0, end=1, text="测试", avg_logprob=-0.1, no_speech_prob=0))()
-        class FakeModel:
-            def transcribe(self, *a, **k):
-                seen.append(k["batch_size"])
-                if k["batch_size"] > 2:
-                    raise RuntimeError("CUDA out of memory")
-                return iter([fake_segment]), fake_info
-        with patch.object(asr, "model_is_ready", return_value=True), patch.object(asr, "get_asr_model", return_value=FakeModel()):
-            result = asr.transcribe("unused", dict(model="medium", device="cuda", compute_type="float16", batch_size=8, beam_size=3))
-        self.assertEqual(seen, [8, 4, 2])
-        self.assertEqual(result["recognition"]["device"], "cuda")
 
     def test_raw_and_readable_outputs_are_both_preserved(self):
         original = [dict(start=1, end=2, text="預算100000元")]
