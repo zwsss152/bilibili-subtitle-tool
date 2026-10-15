@@ -37,13 +37,27 @@ def setup_logging():
 
 def main():
     multiprocessing.freeze_support()
-    initialize()
-    setup_logging()
-    if not acquire_instance():
-        import ctypes
-        ctypes.windll.user32.MessageBoxW(None, "文字稿工具已经在运行，请使用已打开的窗口。", "文字稿", 0x40)
+    import argparse
+    parser = argparse.ArgumentParser(description='文字稿')
+    parser.add_argument('--diagnostics', action='store_true')
+    parser.add_argument('--self-test', metavar='REPORT')
+    parser.add_argument('--browser-self-test', metavar='REPORT')
+    parser.add_argument('--smoke-test', metavar='REPORT')
+    args = parser.parse_args()
+    if args.self_test or args.browser_self_test or args.smoke_test:
+        from .packaging_checks import run_check
+        raise SystemExit(run_check(args))
+    if args.diagnostics:
+        from .diagnostics import show_diagnostics
+        show_diagnostics()
         return
     try:
+        initialize()
+        setup_logging()
+        if not acquire_instance():
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, "文字稿工具已经在运行，请使用已打开的窗口。", "文字稿", 0x40)
+            return
         from .core.documents import migrate_records
         from .core.rename import recover
         # A pending transaction can still own a legacy sidecar; recover it first.
@@ -58,9 +72,10 @@ def main():
         message = traceback.format_exc()
         logging.getLogger("transcripts").error(message)
         import ctypes
-        ctypes.windll.user32.MessageBoxW(None, f"启动失败。请双击“环境诊断.bat”。\n日志：{LOGS_DIR / 'app.log'}", "文字稿 · 启动诊断", 0x10)
+        ctypes.windll.user32.MessageBoxW(None, f"启动失败。可从开始菜单打开“文字稿 · 环境诊断”。\n日志：{LOGS_DIR / 'app.log'}", "文字稿 · 启动诊断", 0x10)
         if sys.stderr:
             print(message, file=sys.stderr)
+        raise SystemExit(1)
     finally:
         if _INSTANCE:
             _INSTANCE.close()

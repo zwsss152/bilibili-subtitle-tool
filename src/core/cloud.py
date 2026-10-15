@@ -30,10 +30,57 @@ DATA = PROJECT_ROOT / '.data'
 SETTINGS = DATA / 'cloud-settings.json'
 SECRET = DATA / 'cloud-key.dpapi'
 ASR_MODEL = 'qwen-audio-3.0-asr-flash'
-EDITOR_MODEL = 'qwen3.5-plus'
-REVIEW_MODEL = 'qwen3-max'
+EDITOR_MODEL = 'qwen3.8-flash'
+REVIEW_MODEL = 'qwen3.8-max'
 VERSION = 3
 _USAGE_LOCK = threading.Lock()
+MODEL_DEFAULTS = dict(asr_model=ASR_MODEL, editor_model=EDITOR_MODEL, review_model=REVIEW_MODEL)
+ASR_CHOICES = (ASR_MODEL, 'qwen3-asr-flash', 'fun-asr-flash')
+TEXT_CHOICES = (EDITOR_MODEL, REVIEW_MODEL, 'qwen3.7-plus', 'qwen-plus')
+
+
+def normalize_models(values=None):
+    values = values or {}
+    selected = {name: str(values.get(name, default)).strip() for name, default in MODEL_DEFAULTS.items()}
+    for name, model in selected.items():
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', model):
+            raise ValueError('模型 ID 只能包含字母、数字、短横线、点、下划线和冒号')
+        if name == 'asr_model' and not re.fullmatch(
+                r'(?:qwen-audio-3\.0-asr-flash|qwen3-asr-flash|fun-asr-flash)(?:-\d{4}-\d{2}-\d{2})?', model):
+            raise ValueError('识别请选择支持的同步 ASR 模型；实时和 filetrans 模型使用不同接口')
+    return selected
+
+
+def model_settings():
+    return normalize_models(read_json(SETTINGS, {}))
+
+
+def available_models(key='', workspace=''):
+    """User-triggered catalog lookup; no paid inference and no credential writes."""
+    workspace = workspace.strip()
+    if workspace and not re.fullmatch(r'[A-Za-z0-9-]{1,100}', workspace):
+        raise ValueError('业务空间 ID 只能包含字母、数字和短横线')
+    base = 'https://' + (workspace + '.cn-beijing.maas.aliyuncs.com' if workspace else 'dashscope.aliyuncs.com')
+    request = urllib.request.Request(base + '/compatible-mode/v1/models',
+        headers={'Authorization': 'Bearer ' + (key.strip() or key_value())})
+    try:
+        with urllib.request.build_opener(_NoRedirect()).open(request, timeout=20) as response:
+            payload = response.read(2 * 1024 * 1024 + 1)
+        if len(payload) > 2 * 1024 * 1024:
+            raise CloudError('模型列表过大，请手动填写模型 ID')
+        data = json.loads(payload)
+        ids = sorted({item['id'] for item in data.get('data', []) if isinstance(item, dict)
+                      and isinstance(item.get('id'), str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', item['id'])})
+        asr = [model for model in ids if re.fullmatch(r'(?:qwen-audio-3\.0-asr-flash|qwen3-asr-flash|fun-asr-flash)(?:-\d{4}-\d{2}-\d{2})?', model)]
+        text = [model for model in ids if model.startswith('qwen') and not any(
+            word in model.lower() for word in ('audio', 'asr', 'realtime', 'image', 'embedding', 'rerank', 'tts', 'omni', 'mt-'))]
+        return dict(asr_model=asr, editor_model=text, review_model=text)
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        exc.close()
+        raise CloudError(_error_message(status=status)) from None
+    except (OSError, ValueError, TypeError, AttributeError):
+        raise CloudError('无法获取模型列表，请检查网络或手动填写模型 ID') from None
 
 
 class CloudError(RuntimeError):
@@ -44,6 +91,8 @@ class CloudError(RuntimeError):
 
 def _error_message(code='', status=0):
     value = str(code).lower()
+    if status == 404 or 'modelnotfound' in value or 'model_not_found' in value:
+        return '所选模型不存在、未开通或不支持当前地域；请在设置中获取可用模型并重新选择'
     if any(word in value for word in ('arrearage','insufficientbalance','quotaexceeded')) or status == 402:
         return '在线服务额度或余额不足，任务已保留，请检查百炼账户'
     if any(word in value for word in ('invalidapikey','unauthorized','accessdenied')) or status in (401,403):
@@ -76,7 +125,8 @@ def _crypt(value, decrypt=False):
         ctypes.windll.kernel32.LocalFree(ctypes.cast(outgoing.data, ctypes.c_void_p))
 
 
-def save_credentials(key='', workspace=''):
+def save_credentials(key='', workspace='', models=None):
+    selected = normalize_models(models if models is not None else model_settings())
     workspace = workspace.strip()
     if workspace and not re.fullmatch(r'[A-Za-z0-9-]{1,100}', workspace):
         raise ValueError('业务空间 ID 只能包含字母、数字和短横线')
@@ -86,7 +136,7 @@ def save_credentials(key='', workspace=''):
         temp = SECRET.with_suffix('.tmp')
         temp.write_bytes(encrypted)
         os.replace(temp, SECRET)
-    atomic_json(SETTINGS, dict(workspace=workspace, region='beijing'))
+    atomic_json(SETTINGS, dict(workspace=workspace, region='beijing', **selected))
 
 
 def configured():
@@ -133,9 +183,13 @@ class CloudClient:
     device = 'cloud'
     process = None
 
-    def __init__(self, transport=None):
+    def __init__(self, transport=None, models=None):
         self.transport = transport
         self.response = None
+        self.models = normalize_models(models if models is not None else model_settings())
+        self.asr_model = self.models['asr_model']
+        self.model_name = self.models['editor_model']
+        self.review_model = self.models['review_model']
 
     def start(self, cancel=None):
         check_cancel(cancel)
@@ -233,7 +287,7 @@ class CloudClient:
 
     def generate(self, system, content, schema, cancel=None):
         audit = 'checks' in schema.get('properties', {})
-        model = REVIEW_MODEL if audit else EDITOR_MODEL
+        model = self.review_model if audit else self.model_name
         # JSON mode guarantees syntax, not this application's object fields.
         # Supply the schema explicitly; do not assume the model knows it.
         system += '\n严格按以下 JSON Schema 返回一个 JSON 对象：\n' + json.dumps(schema, ensure_ascii=False)
@@ -261,11 +315,27 @@ class CloudClient:
         if context:
             messages.append(dict(role='user', content=[dict(type='input_text', text=context[:400])]))
         messages.append(dict(role='user', content=[dict(type='input_audio', input_audio=dict(data='data:audio/wav;base64,' + encoded))]))
+        parameters = dict(format='wav', sample_rate='16000')
+        if self.asr_model.startswith('qwen3-asr-flash'):
+            messages = ([dict(role='system', content=[dict(text=context[:400])])] if context else [])
+            messages.append(dict(role='user', content=[dict(audio='data:audio/wav;base64,' + encoded)]))
+            parameters = dict(asr_options=dict(enable_itn=False))
         results = self._request('/api/v1/services/aigc/multimodal-generation/generation',
-            dict(model=ASR_MODEL, input=dict(messages=messages), parameters=dict(format='wav', sample_rate='16000')),
+            dict(model=self.asr_model, input=dict(messages=messages), parameters=parameters),
             cancel, streaming=False)
-        usage = self._usage(ASR_MODEL, results)
+        usage = self._usage(self.asr_model, results)
         sentences, words, full = {}, {}, ''
+        if self.asr_model.startswith('qwen3-asr-flash'):
+            try:
+                choice = results[-1]['output']['choices'][0]
+                if choice.get('finish_reason') != 'stop':
+                    raise ValueError()
+                full = ''.join(item.get('text', '') for item in choice['message']['content'])
+                if not full.strip():
+                    raise ValueError()
+                return dict(text=full, segments=[], precise=False, usage=usage)
+            except (KeyError, IndexError, TypeError, ValueError):
+                raise CloudError('识别响应不完整，未使用不完整结果') from None
         final = results[-1].get('output', {}).get('sentence', {})
         if final.get('sentence_end') is False:
             raise CloudError('在线识别流提前结束，未使用中间结果')
@@ -388,7 +458,8 @@ def transcribe(audio_path, checkpoint, context='', progress=lambda *a:None, canc
     audio_path, checkpoint = Path(audio_path), Path(checkpoint)
     with audio_path.open('rb') as stream:
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-    source = hashlib.sha256((digest + ASR_MODEL + str(VERSION) + context[:400]).encode()).hexdigest()
+    actual_model = getattr(client, 'asr_model', ASR_MODEL)
+    source = hashlib.sha256((digest + actual_model + str(VERSION) + context[:400]).encode()).hexdigest()
     state = read_json(checkpoint, {})
     if state.get('source') != source:
         state = dict(version=VERSION, source=source, blocks=[])
@@ -438,5 +509,5 @@ def transcribe(audio_path, checkpoint, context='', progress=lambda *a:None, canc
         atomic_json(checkpoint, state)
         progress(int((index+1)*99/count), f'在线识别 {index+1}/{count}')
     return dict(segments=[s for block in state['blocks'] for s in block['segments']],
-        recognition=dict(engine='cloud', model=ASR_MODEL, device='cloud', duration=duration,
+        recognition=dict(engine='cloud', model=actual_model, device='cloud', duration=duration,
                          source_hash=source, version=VERSION, elapsed_seconds=time.perf_counter()-started))

@@ -17,7 +17,7 @@ from ..core import rename as document_rename
 from .tasks import Task, Page, migrate_legacy
 from .recognizer import worker
 from .reading_service import ReadingService
-from ..core.cloud import CloudClient, configured, checkpoint_path, discard_checkpoints
+from ..core.cloud import CloudClient, configured, checkpoint_path, discard_checkpoints, model_settings
 from ..core.library import reading_path
 from ..core.local_media import inspect_media
 
@@ -61,6 +61,8 @@ class Scheduler:
                     shutil.copy2(self.state_path, backup)
                 self.log(f'跳过异常任务记录，原记录已备份至 {backup.name}')
         for job in self.jobs:
+            if job.engine == 'cloud' and not job.cloud_models:
+                job.cloud_models = model_settings()
             if job.engine == 'local':
                 # Preserve prior upload intent: require an explicit retry.
                 message = '本地模型已移除；点击重试将未完成部分转为在线处理'
@@ -142,14 +144,18 @@ class Scheduler:
         if not configured():
             return 0, 0, ['请先在设置中填写阿里云百炼 API Key，再使用在线方式']
         sources, rejected = extract_sources(text)
+        models = model_settings()
         added, duplicates = 0, 0
         with self.lock:
             self.cookie = cookie
             for source in sources:
-                if any(job.key == (source.kind, source.ref, source.page) and job.engine == engine for job in self.jobs):
+                if any(job.key == (source.kind, source.ref, source.page) and job.engine == engine
+                       and job.cloud_models == models for job in self.jobs):
                     duplicates += 1
                     continue
-                self.jobs.append(Task.create(source, topic, engine))
+                task = Task.create(source, topic, engine)
+                task.cloud_models = models.copy()
+                self.jobs.append(task)
                 added += 1
         self._persist()
         return added, duplicates, rejected
@@ -474,7 +480,7 @@ class Scheduler:
             if job.engine == 'cloud':
                 context = (job.title + '\n' + getattr(job,'_info',{}).get('description',''))[:400]
             self.inputs.put(dict(identity=identity, audio=audio, title=context,
-                                 engine=job.engine, checkpoint=str(checkpoint)))
+                                 engine=job.engine, checkpoint=str(checkpoint), cloud_models=job.cloud_models))
             cancelled_at = None
             try:
                 while not self.stopping.is_set():

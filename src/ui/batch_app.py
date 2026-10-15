@@ -4,6 +4,7 @@ import logging
 import os
 from pathlib import Path
 import queue
+import threading
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, scrolledtext, filedialog
@@ -12,7 +13,8 @@ import webbrowser
 from . import kit as ui
 from .reader import TranscriptReader, parse_document
 from ..config import load_config, save_config
-from ..paths import OUTPUT_ROOT, APP_ICON, resolve_owned
+from ..paths import OUTPUT_ROOT, APP_ICON, LOGS_DIR, resolve_owned
+from ..version import VERSION
 from ..services.scheduler import Scheduler
 from ..core.textout import read_document, sanitize_filename
 from ..core.topics import create_topic
@@ -28,7 +30,7 @@ class BatchApp(tk.Tk):
         if demo_scale:
             self.tk.call("tk", "scaling", 96 / 72 * demo_scale)
         self.cfg = load_config()
-        self.title("文字稿 · B 站、抖音与机核")
+        self.title(f"文字稿 · B 站、抖音与机核 · {VERSION}")
         self.geometry(self.cfg.get("geometry") or "1180x820")
         line_height = tkfont.Font(font=ui.ui_font(self, 10)).metrics('linespace')
         self.minsize(960, max(640, line_height * 29))
@@ -45,6 +47,10 @@ class BatchApp(tk.Tk):
         self.bind("<Control-Return>", lambda e: self.enqueue())
         self.refresh_library()
         self.after(100, self._refresh)
+        if autostart:
+            from ..core.cloud import configured
+            if not configured() and not self.cfg.get('onboarding_seen'):
+                self.after(350, self.first_run)
 
     def _style(self):
         style = ttk.Style(self)
@@ -579,45 +585,129 @@ class BatchApp(tk.Tk):
                 pass
         self.after(250, self._refresh)
 
+    def first_run(self):
+        from tkinter import messagebox
+        save_config(onboarding_seen=True)
+        if messagebox.askokcancel('欢迎使用文字稿',
+                '程序已包含运行环境，无需安装 Python 或下载模型。\n\n'
+                '转录和整理通过阿里云百炼完成，会发送音频与文字并产生对应账户费用。\n'
+                '请使用自己的北京地域百炼 API Key，并在设置中选择识别、整理和核对模型。\n'
+                '密钥首次填写后会在本机加密保存。\n\n'
+                '点击“确定”打开设置；也可以稍后从右上角设置中填写。', parent=self):
+            self.settings()
+
     def settings(self):
         from ..core import cloud
         window = tk.Toplevel(self)
-        window.title("设置")
-        window.geometry("650x455")
+        window.title('设置 · 云端服务与模型')
+        window.geometry('720x680')
+        window.minsize(680, 640)
         window.configure(bg=ui.T.bg)
         window.transient(self)
-        card = ui.Card(window, pad=20)
-        card.pack(fill="both", expand=True, padx=16, pady=16)
-        body = card.body
-        self.label(body, "B 站 Cookie（可选）", 11, True).pack(anchor="w")
-        self.label(body, "需要登录的字幕与音频共用；仅保存在本机。", 9, color=ui.T.text2).pack(anchor="w", pady=8)
-        field = ui.TextField(body, textvariable=self.cookie_var, width=560)
-        field.entry.configure(show="•")
-        field.pack(fill="x", pady=(0, 12))
-        field.entry.bind("<FocusOut>", lambda e: self._save_settings())
-        self.label(body, '阿里云百炼 API Key（在线方式）', 11, True).pack(anchor='w', pady=(8,0))
-        self.label(body, '已加密保存；留空保留密钥。在线任务会发送音频与文字到百炼。' if cloud.configured() else '北京地域；密钥本机加密。在线任务会发送音频与文字到百炼。',
-                   9, color=ui.T.text2).pack(anchor='w', pady=8)
+        notebook = ttk.Notebook(window)
+        notebook.pack(fill='both', expand=True, padx=16, pady=(16, 8))
+        tabs = {}
+        for title in ('云端服务', '模型选择', '平台与应用'):
+            frame = tk.Frame(notebook, bg=ui.T.bg, padx=18, pady=16)
+            notebook.add(frame, text=title)
+            tabs[title] = frame
+        body = tabs['云端服务']
+        self.label(body, '阿里云百炼 · 北京地域', 12, True).pack(anchor='w')
+        self.label(body, '请使用你自己的 API Key，费用由对应百炼账户承担。', 10, color=ui.T.text2).pack(anchor='w', pady=(8, 4))
+        self.label(body, '音频与待整理文字会发送至百炼；平台 Cookie 不会发送。', 9, color=ui.T.text2).pack(anchor='w', pady=(0, 18))
+        self.label(body, 'API Key', 11, True).pack(anchor='w')
         key = tk.StringVar()
         key_field = ui.TextField(body, textvariable=key, width=560)
         key_field.entry.configure(show='•')
-        key_field.pack(fill='x')
-        self.label(body, '业务空间 ID（可选，使用专属域名时填写）', 9, color=ui.T.text2).pack(anchor='w', pady=(12,6))
-        workspace = tk.StringVar(value=cloud.read_json(cloud.SETTINGS, {}).get('workspace',''))
+        key_field.pack(fill='x', pady=(8, 4))
+        state = '已配置；留空保留原密钥。' if cloud.configured() else '尚未配置；填写后保存在本机，使用 Windows 加密。'
+        self.label(body, state, 9, color=ui.T.text2).pack(anchor='w')
+        self.label(body, '业务空间 ID（可选）', 10, True).pack(anchor='w', pady=(20, 8))
+        workspace = tk.StringVar(value=cloud.read_json(cloud.SETTINGS, {}).get('workspace', ''))
         ui.TextField(body, textvariable=workspace, width=560).pack(fill='x')
+        self.label(body, '使用专属业务空间域名时填写；普通账户留空。', 9, color=ui.T.text2).pack(anchor='w', pady=6)
+        self.button(body, '打开百炼控制台', lambda: webbrowser.open('https://bailian.console.aliyun.com/')).pack(anchor='w', pady=16)
+        body = tabs['模型选择']
+        self.label(body, '为三个处理阶段分别选择模型', 12, True).pack(anchor='w', pady=(0, 8))
+        self.label(body, '可选择推荐项，也可输入兼容模型的完整 ID；模型权限以你的账户为准。', 9, color=ui.T.text2).pack(anchor='w', pady=(0, 14))
+        values = cloud.model_settings()
+        model_vars, model_boxes = {}, {}
+        fields = [('asr_model', '语音识别', cloud.ASR_CHOICES),
+                  ('editor_model', '阅读稿整理', cloud.TEXT_CHOICES),
+                  ('review_model', '内容核对', (cloud.REVIEW_MODEL, cloud.EDITOR_MODEL, 'qwen3.7-plus', 'qwen-plus'))]
+        for name, title, choices in fields:
+            self.label(body, title, 10, True).pack(anchor='w', pady=(8, 4))
+            value = tk.StringVar(value=values[name])
+            model_vars[name] = value
+            box = ttk.Combobox(body, textvariable=value, values=choices, state='normal')
+            model_boxes[name] = box
+            box.pack(fill='x', pady=(0, 6))
+        catalog_state = tk.StringVar(value='可获取当前密钥对应的模型列表，也可保留手动输入。')
+        catalog_results = queue.Queue()
+        fetching = False
+        def poll_catalog():
+            nonlocal fetching
+            if not window.winfo_exists():
+                return
+            try:
+                result, message = catalog_results.get_nowait()
+                fetching = False
+                if result is not None:
+                    for name, items in result.items():
+                        if items:
+                            model_boxes[name].configure(values=items)
+                catalog_state.set(message)
+            except queue.Empty:
+                pass
+            window.after(100, poll_catalog)
+        window.after(100, poll_catalog)
+        def refresh_models():
+            nonlocal fetching
+            if fetching:
+                return
+            fetching = True
+            credential, space = key.get(), workspace.get()
+            catalog_state.set('正在获取可用模型…')
+            def run():
+                try:
+                    result = cloud.available_models(credential, space)
+                    catalog_results.put((result, '列表已更新；请选择后保存。列表可见不代表账户已开通全部模型。'))
+                except (OSError, ValueError, RuntimeError) as exc:
+                    catalog_results.put((None, str(exc)))
+            threading.Thread(target=run, daemon=True).start()
+        self.button(body, '获取可用模型（不发起转录）', refresh_models).pack(anchor='w', pady=(6, 3))
+        self.label(body, textvariable=catalog_state, size=9, color=ui.T.text2, wraplength=590).pack(anchor='w')
+        self.label(body, '识别仅支持同步 ASR 及其日期快照，不支持实时、filetrans 或其他厂商接口。', 9, color=ui.T.text2).pack(anchor='w', pady=(16, 5))
+        self.label(body, 'Qwen3-ASR 的原稿按音频分块标时；具备词时间戳的模型保留更细时间。', 9, color=ui.T.text2).pack(anchor='w', pady=3)
+        self.label(body, '保存后用于新任务和新整理请求；已入队任务保持原模型。', 9, color=ui.T.text2).pack(anchor='w', pady=3)
+        body = tabs['平台与应用']
+        self.label(body, 'B 站 Cookie（可选）', 11, True).pack(anchor='w')
+        field = ui.TextField(body, textvariable=self.cookie_var, width=560)
+        field.entry.configure(show='•')
+        field.pack(fill='x', pady=(8, 5))
+        self.label(body, '仅保存在本机，用于需要登录的资源。', 9, color=ui.T.text2).pack(anchor='w')
+        self.label(body, f'文字稿 {VERSION}', 11, True).pack(anchor='w', pady=(28, 8))
+        self.label(body, '个人数据独立保存，升级和卸载会保留稿件、队列与设置。', 9, color=ui.T.text2).pack(anchor='w', pady=5)
+        self.button(body, '打开日志文件夹', self.open_logs).pack(anchor='w', pady=10)
+        footer = tk.Frame(window, bg=ui.T.bg)
+        footer.pack(fill='x', padx=18, pady=(0, 16))
         error = tk.StringVar()
-        self.label(body, textvariable=error, size=9, color=ui.T.error).pack(anchor='w', pady=8)
+        self.label(footer, textvariable=error, size=9, color=ui.T.error, wraplength=600).pack(anchor='w', pady=6)
         def save():
             try:
-                if key.get().strip() or cloud.configured() or workspace.get().strip():
-                    cloud.save_credentials(key.get(), workspace.get())
+                models = cloud.normalize_models({name: value.get() for name, value in model_vars.items()})
+                cloud.save_credentials(key.get(), workspace.get(), models=models)
                 key.set('')
                 self._save_settings()
-                self.status_var.set('设置已保存；识别和整理均使用百炼云端')
+                self.status_var.set('设置已保存；新任务使用所选模型，已入队任务保持原模型')
                 window.destroy()
             except (OSError, ValueError, RuntimeError) as exc:
                 error.set(str(exc))
-        self.button(body, "保存设置", save, "primary").pack(anchor="e")
+        self.button(footer, '保存设置', save, 'primary').pack(anchor='e')
+
+    def open_logs(self):
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        os.startfile(LOGS_DIR)
 
     def report_callback_exception(self, exc_type, exc, traceback):
         logging.getLogger("transcripts").error("界面操作失败", exc_info=(exc_type, exc, traceback))

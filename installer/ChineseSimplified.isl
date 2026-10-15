@@ -1,0 +1,61 @@
+; Simplified Chinese messages for this application's installer.
+; Unlisted uncommon error messages inherit Inno Setup's English defaults.
+[LangOptions]
+LanguageName=简体中文
+LanguageID=$0804
+LanguageCodePage=0
+DialogFontName=Microsoft YaHei UI
+DialogFontSize=9
+
+[Messages]
+SetupAppTitle=安装程序
+SetupWindowTitle=%1 安装程序
+UninstallAppTitle=卸载程序
+UninstallAppFullTitle=卸载 %1
+InformationTitle=提示
+ConfirmTitle=确认
+ErrorTitle=错误
+ButtonBack=< 上一步(&B)
+ButtonNext=下一步(&N) >
+ButtonInstall=安装(&I)
+ButtonOK=确定
+ButtonCancel=取消
+ButtonYes=是(&Y)
+ButtonNo=否(&N)
+ButtonFinish=完成(&F)
+ButtonBrowse=浏览(&B)...
+ButtonWizardBrowse=浏览(&B)...
+SelectLanguageTitle=选择安装语言
+SelectLanguageLabel=请选择安装过程中使用的语言。
+ClickNext=点击“下一步”继续，或点击“取消”退出安装。
+WelcomeLabel1=欢迎使用 [name] 安装向导
+WelcomeLabel2=此向导将在你的电脑上安装 [name/ver]。%n%n程序已包含 Python、界面与音频处理组件，无需另外配置环境。云端转录需要你自己的百炼 API Key。
+WizardSelectDir=选择安装位置
+SelectDirDesc=选择 [name] 的安装位置。
+SelectDirLabel3=安装程序将把 [name] 安装到以下文件夹。
+WizardSelectTasks=选择附加任务
+SelectTasksDesc=请选择需要执行的附加任务。
+SelectTasksLabel2=选择安装 [name] 时要执行的附加任务，然后点击“下一步”。
+WizardReady=准备安装
+ReadyLabel1=现在可以开始安装 [name]。
+ReadyLabel2a=点击“安装”开始安装。需要修改设置可点击“上一步”。
+ReadyMemoDir=安装位置：
+ReadyMemoGroup=开始菜单文件夹：
+ReadyMemoTasks=附加任务：
+WizardPreparing=正在准备安装
+PreparingDesc=安装程序正在准备将 [name] 安装到你的电脑。
+WizardInstalling=正在安装
+InstallingLabel=请稍候，正在安装 [name]。
+FinishedHeadingLabel=[name] 安装完成
+FinishedLabel=安装程序已完成安装 [name]。你可以通过桌面或开始菜单快捷方式打开软件。
+FinishedLabelNoIcons=安装程序已完成安装 [name]。
+ClickFinish=点击“完成”退出安装向导。
+RunEntryExec=启动 %1
+ExitSetupTitle=退出安装
+ExitSetupMessage=安装尚未完成。现在退出将无法完成安装。%n%n是否退出？
+SetupAppRunningError=%1 正在运行。%n%n请先关闭应用，再点击“确定”继续。
+UninstallAppRunningError=%1 正在运行。%n%n请先关闭应用，再继续卸载。
+WindowsVersionNotSupported=此软件需要 Windows 10 22H2 或 Windows 11 的 64 位系统。
+ConfirmUninstall=是否卸载 %1？%n%n你的稿件、队列和个人设置将保留。
+UninstallStatusLabel=正在卸载 %1，请稍候。
+UninstalledAll=%1 已成功卸载。个人数据已保留。

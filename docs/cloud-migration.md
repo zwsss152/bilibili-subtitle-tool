@@ -27,7 +27,7 @@
 - 已完成且源文未变化的阅读稿保留，包括旧整理版本；云端接口失败明确标记“整理失败”，保留原稿和已保存分块。
 - 保留 API Key 的 Windows DPAPI 加密、断点、限流重试、取消和退出清理。
 
-当前云端模型沿用原项目：`qwen-audio-3.0-asr-flash` 识别、`qwen3.5-plus` 整理、`qwen3-max` 核对。未擅自切换模型或触发付费请求。
+当前云端模型沿用原项目：`qwen-audio-3.0-asr-flash` 识别、`qwen3.8-flash` 整理、`qwen3.8-max` 核对。安装版支持用户选择模型；短音频真实验收和默认模型调整见 `windows-installer.md`。
 
 ## 后续优化建议
 

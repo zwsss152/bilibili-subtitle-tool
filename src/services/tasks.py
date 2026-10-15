@@ -43,14 +43,17 @@ class Task:
     pages: list[Page] = field(default_factory=list)
     cancelled: bool = False
     engine: str = 'cloud'
+    cloud_models: dict = field(default_factory=dict)
 
     @classmethod
     def create(cls, source, topic, engine='cloud'):
         if engine != 'cloud':
             raise ValueError('本地模型已移除，请使用在线方式')
         topic = sanitize_filename(topic or "未分类")
+        from ..core.cloud import model_settings
         return cls(uuid.uuid4().hex, source.kind, source.ref, source.url, topic,
-                   str(Path("文字稿") / ORIGINAL / topic), source.page, source.url, engine=engine)
+                   str(Path("文字稿") / ORIGINAL / topic), source.page, source.url, engine=engine,
+                   cloud_models=model_settings())
 
     @property
     def key(self):
