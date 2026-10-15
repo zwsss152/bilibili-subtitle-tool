@@ -73,12 +73,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: v${{ needs.build.outputs.version }}
+          RELEASE_TAG: v${{ needs.build.outputs.version }}${{ github.event_name == 'pull_request' && '-rc.1' || '' }}
           RELEASE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           $setup = (Get-ChildItem artifacts -Recurse -Filter 'BilibiliSubtitleTool-Setup-*-x64.exe').FullName
           $hash = "$setup.sha256"
-          $notes = 'Windows x64 installation package. Includes Python, Tk, FFmpeg and WebView2 offline runtime. Users supply their own Bailian API key and choose models in Settings. Build, offline component and installer lifecycle checks passed; clean Windows VM and real cloud acceptance must be recorded before publishing this draft.'
+          $notes = 'Windows x64 installation candidate. Includes Python, Tk, FFmpeg and WebView2 offline runtime. Users supply their own Bailian API key and choose models in Settings. Build, offline component and installer lifecycle checks passed. Real cloud recognition, editing and review passed on a short synthetic audio sample with user-authorized credentials; no credentials are included. Clean Windows 10/11 VM and cross-version upgrade validation remain pending. Keep this candidate as a draft until those checks pass.'
           $existing = gh release view $env:RELEASE_TAG --repo $env:GH_REPO --json isDraft --jq .isDraft 2>$null
           if ($LASTEXITCODE -eq 0) {
             if ($existing.Trim() -ne 'true') { throw 'Published releases are immutable; use a new version tag' }
@@ -87,3 +87,4 @@ jobs:
             gh release create $env:RELEASE_TAG $setup $hash --repo $env:GH_REPO --target $env:RELEASE_COMMIT --draft --title "文字稿 $env:RELEASE_TAG · Windows 安装版候选" --notes $notes
           }
           if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }
+
