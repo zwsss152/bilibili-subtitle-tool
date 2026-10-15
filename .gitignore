@@ -5,6 +5,7 @@ __pycache__/
 
 # ---- 虚拟环境（依赖通过 requirements.txt 安装，不入库）----
 .venv/
+.python/
 .test-deps/
 test-results.txt
 venv/

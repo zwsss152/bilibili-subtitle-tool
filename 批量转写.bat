@@ -1,4 +1,3 @@
 @echo off
-chcp 65001 >nul
-cd /d "%~dp0"
-call "启动.bat"
+call "%~dp0launch.cmd"
+exit /b %errorlevel%
