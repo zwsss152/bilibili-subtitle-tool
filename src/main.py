@@ -61,6 +61,7 @@ def main():
         ctypes.windll.user32.MessageBoxW(None, f"启动失败。请双击“环境诊断.bat”。\n日志：{LOGS_DIR / 'app.log'}", "文字稿 · 启动诊断", 0x10)
         if sys.stderr:
             print(message, file=sys.stderr)
+        raise SystemExit(1)
     finally:
         if _INSTANCE:
             _INSTANCE.close()
