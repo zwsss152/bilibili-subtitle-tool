@@ -1,4 +1,4 @@
-"""Real ASR -> local editor lifecycle, using a copied local two-minute clip."""
+"""Cloud ASR -> cloud editor lifecycle, using a copied local two-minute clip."""
 from pathlib import Path
 import json
 import shutil
@@ -19,7 +19,7 @@ from src.core.cloud import discard_checkpoints
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('--engine',choices=('local','cloud'),default='local')
+    parser.add_argument('--engine',choices=('cloud',),default='cloud')
     parser.add_argument('--run',default='reading-final')
     args=parser.parse_args()
     artifacts=PROJECT_ROOT/'tests'/'.artifacts'
@@ -29,8 +29,6 @@ def main():
         assert root.is_relative_to(artifacts.resolve())
         for module in (documents,library,rename,reading_service):module.OUTPUT_ROOT=root/'output'
         documents.RECORDS_DIR=rename.RECORDS_DIR=root/'records'
-        reading.PROFILE=root/'profile.json'
-        reading.PROFILE.write_text(json.dumps(dict(version=reading.VERSION,validated=True)),encoding='utf-8')
         audio=root/'audio.wav'
         shutil.copyfile(PROJECT_ROOT/'benchmarks'/'clips'/'interview_1.wav',audio)
         scheduler=Scheduler(state_path=root/'queue.json',autostart=False)
@@ -51,10 +49,12 @@ def main():
         started=time.monotonic()
         try:
             while time.monotonic()-started<240:
-                if scheduler.process and scheduler.editor.process:
+                if scheduler.process and scheduler.cloud_editor.process:
                     raise AssertionError('ASR与整理模型同时驻留')
                 if scheduler.process:phases.add('ASR')
-                if scheduler.editor.process:phases.add('editor')
+                if scheduler.cloud_editor.process:phases.add('editor')
+                if job.status == '完成' and not page.reading_requested:
+                    scheduler.request_reading(PROJECT_ROOT / page.txt)
                 if page.reading_status in ('完成','原文排版'):
                     break
                 if job.status=='失败' or page.reading_status=='整理失败':
@@ -62,7 +62,7 @@ def main():
                 time.sleep(.1)
             assert page.reading_status in ('完成','原文排版'),page.reading_status
             assert job.status=='完成'
-            assert phases==({'ASR','editor'} if args.engine=='local' else {'ASR'}),phases
+            assert phases=={'ASR'},phases
             raw=json.loads((PROJECT_ROOT/page.raw).read_text(encoding='utf-8'))
             result=dict(seconds=round(time.monotonic()-started,3),phases=sorted(phases),
                         original_device=raw['recognition']['device'],editor_device=raw['reading']['device'],
@@ -71,7 +71,7 @@ def main():
                         model_error=raw['reading'].get('model_error',''),
                         original_exists=(PROJECT_ROOT/page.txt).exists(),reading_exists=(PROJECT_ROOT/page.reading).exists())
             assert raw['recognition']['engine']==args.engine
-            assert raw['reading']['strategy']==('local' if args.engine=='local' else 'cloud')
+            assert raw['reading']['strategy']=='cloud'
             scheduler.rename_transcript(job.jid,'流水线新名称')
             assert (PROJECT_ROOT/page.txt).name=='流水线新名称.txt'
             assert (PROJECT_ROOT/page.reading).name=='流水线新名称.txt'
@@ -88,7 +88,7 @@ def main():
         finally:
             scheduler.shutdown()
             discard_checkpoints(job.jid)
-        assert scheduler.process is None and scheduler.editor.process is None
+        assert scheduler.process is None and scheduler.cloud_editor.process is None
 
 
 if __name__=='__main__':main()

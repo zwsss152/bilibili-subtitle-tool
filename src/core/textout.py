@@ -4,15 +4,11 @@ import json
 import os
 from pathlib import Path
 import re
-import threading
 import unicodedata
 from .bilibili import fmt_ts
-from .models import PUNCTUATION_PATH
 from ..config import atomic_json
 
 _CONVERTER = None
-_PUNCTUATOR = None
-_LOCK = threading.Lock()
 _PUNCT_MAP = str.maketrans({"﹐": "，", "﹑": "、", "﹒": "。", "．": "。", "｡": "。",
                           "､": "、", "﹔": "；", "﹕": "：", "﹖": "？", "﹗": "！"})
 
@@ -42,33 +38,13 @@ def content_key(text):
 
 
 def add_punctuation(text, log=None, punctuator=None):
-    global _PUNCTUATOR
-    # Existing punctuation is retained instead of reinterpreting already readable speech.
-    if len(re.findall(r"[，。！？；：,.!?;:]", text)) >= max(1, len(text) // 80):
+    # Cloud recognition/editing supplies punctuation. Never load local models.
+    if punctuator is None:
         return text
     try:
-        with _LOCK:
-            if punctuator is None:
-                if not PUNCTUATION_PATH.exists():
-                    if log:
-                        log("本地标点模型未就绪，暂时保留原文；可在设置中下载")
-                    return text
-                if _PUNCTUATOR is None:
-                    import sherpa_onnx
-                    config = sherpa_onnx.OfflinePunctuationConfig(
-                        model=sherpa_onnx.OfflinePunctuationModelConfig(
-                            ct_transformer=str(PUNCTUATION_PATH), num_threads=4, provider="cpu"))
-                    _PUNCTUATOR = sherpa_onnx.OfflinePunctuation(config)
-                punctuator = _PUNCTUATOR.add_punctuation
-            result = punctuator(text)
-        if content_key(result) != content_key(text):
-            if log:
-                log("标点模型改变了文字顺序，本段保留原文")
-            return text
-        return result
-    except Exception as exc:
-        if log:
-            log(f"标点恢复不可用，保留原文（{type(exc).__name__}）")
+        result = punctuator(text)
+        return result if content_key(result) == content_key(text) else text
+    except Exception:
         return text
 
 

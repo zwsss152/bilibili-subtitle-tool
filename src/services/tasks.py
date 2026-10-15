@@ -42,12 +42,12 @@ class Task:
     error: str = ""
     pages: list[Page] = field(default_factory=list)
     cancelled: bool = False
-    engine: str = 'local'
+    engine: str = 'cloud'
 
     @classmethod
-    def create(cls, source, topic, engine='local'):
-        if engine not in ('local', 'cloud'):
-            raise ValueError('请选择本地或在线方式')
+    def create(cls, source, topic, engine='cloud'):
+        if engine != 'cloud':
+            raise ValueError('本地模型已移除，请使用在线方式')
         topic = sanitize_filename(topic or "未分类")
         return cls(uuid.uuid4().hex, source.kind, source.ref, source.url, topic,
                    str(Path("文字稿") / ORIGINAL / topic), source.page, source.url, engine=engine)
@@ -83,6 +83,7 @@ class Task:
     @classmethod
     def from_dict(cls, values, restore=True):
         fields = cls.__dataclass_fields__
+        values = {'engine': 'local', **values}
         task = cls(**{k: v for k, v in values.items() if k in fields and k != "pages"})
         if task.engine not in ('local', 'cloud'):
             raise ValueError('任务识别方式无效')
@@ -114,7 +115,7 @@ def migrate_legacy(values, default_topic):
         ref = ":".join(map(str, ref))
     topic = sanitize_filename(default_topic or "未分类")
     task = Task(str(values.get("jid") or uuid.uuid4().hex), kind, ref, values.get("raw", ""), topic,
-                str(Path("文字稿") / topic), title=values.get("title", ""))
+                str(Path("文字稿") / topic), title=values.get("title", ""), engine='local')
     for index, old_path in enumerate(values.get("saved", []), 1):
         path = Path(old_path)
         parts = path.parts

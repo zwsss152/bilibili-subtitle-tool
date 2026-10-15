@@ -1,13 +1,10 @@
-"""Independently decode Chinese speech; keep both readings and original timings."""
+"""Pure text validation helpers; no acoustic model or model downloads."""
 from difflib import SequenceMatcher
 from functools import lru_cache
 import re
 import unicodedata
-from .models import SENSE_VOICE_DIR, ensure_sense_voice
-from .net import JobCancelled, check_cancel
 from .textout import content_key, to_simplified
 
-_ENGINE = None
 
 
 @lru_cache(maxsize=4096)
@@ -46,19 +43,6 @@ def _homophone_pairs(old, new):
         else:
             j -= 1
     return pairs
-
-
-def engine(progress=lambda *a: None, cancel=None):
-    global _ENGINE
-    if _ENGINE is None:
-        ensure_sense_voice(progress, cancel)
-        check_cancel(cancel)
-        import sherpa_onnx
-        _ENGINE = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-            model=str(SENSE_VOICE_DIR / 'model.int8.onnx'),
-            tokens=str(SENSE_VOICE_DIR / 'tokens.txt'), language='zh',
-            num_threads=8, use_itn=False, provider='cpu')
-    return _ENGINE
 
 
 def damaged(text):
@@ -151,39 +135,3 @@ def choose_reading(original, candidate, duration=None):
     return (''.join(result), '采用中文声学复核的同音字修正') if changed else (original, '保留原识别：未发现可信的同音字修正')
 
 
-def review(audio_path, segments, progress=lambda *a: None, cancel=None, log=lambda *a: None):
-    from faster_whisper.audio import decode_audio
-    try:
-        recognizer = engine(lambda message, pct=None: log(message), cancel)
-        audio = decode_audio(str(audio_path), sampling_rate=16000)
-    except JobCancelled:
-        raise
-    except Exception as exc:
-        log(f'中文复核不可用，保留语音识别结果（{type(exc).__name__}: {exc}）')
-        return segments, dict(engine='sense-voice-int8', available=False, error=str(exc))
-    output, changed = [], 0
-    for index, segment in enumerate(segments):
-        check_cancel(cancel)
-        item = dict(segment)
-        start = max(0, round(segment['start'] * 16000))
-        end = min(len(audio), round(segment['end'] * 16000))
-        # Whisper normally returns windows shorter than 30 s. Do not cut a long
-        # exceptional segment at an arbitrary word boundary just to review it.
-        if 0 < end - start <= 60 * 16000:
-            try:
-                stream = recognizer.create_stream()
-                stream.accept_waveform(16000, audio[start:end])
-                recognizer.decode_stream(stream)
-                candidate = stream.result.text
-                selected, reason = choose_reading(segment['text'], candidate, duration=(end-start)/16000)
-                item.update(text=selected, whisper_text=segment['text'],
-                            sense_voice_text=candidate, review_reason=reason)
-                changed += selected != segment['text']
-            except Exception as exc:
-                item['review_reason'] = f'保留原识别：中文复核失败（{type(exc).__name__}）'
-        output.append(item)
-        progress(80 + int(19 * (index + 1) / max(1, len(segments))), '中文语音复核')
-    check_cancel(cancel)
-    log(f'中文语音复核完成：{changed} / {len(segments)} 条采用复核结果')
-    return output, dict(engine='sense-voice-int8', strategy='acoustic-recovery-v2', available=True,
-                        reviewed=len(segments), changed=changed)

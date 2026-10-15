@@ -1,5 +1,6 @@
 """Two-file lifecycle tests run only in a verified project-local fixture root."""
 import copy
+from contextlib import nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +18,7 @@ from src.services.tasks import Task, Page
 
 
 class Editor:
+    engine = "cloud"
     def __init__(self, hook=None):
         self.hook = hook
         self.calls = 0
@@ -55,6 +57,8 @@ class ReadingTests(unittest.TestCase):
             p.start();self.addCleanup(p.stop)
         self.state = self.root/'queue.json'
         self.scheduler = Scheduler(state_path=self.state,autostart=False)
+        configured = patch.object(reading_service, 'configured', return_value=True)
+        configured.start(); self.addCleanup(configured.stop)
 
     def fixture(self, count=1, units=2):
         task = Task.create(parse_source('BV17x411w7KC'),'主题')
@@ -71,11 +75,14 @@ class ReadingTests(unittest.TestCase):
         self.scheduler._persist()
         return task
 
-    def run_draft(self, job, editor=None, local=False):
+    def run_draft(self, job, editor=None, valid_replies=False):
         service=self.scheduler.reading_service
         service.enqueue((job.jid,job.pages[0].number))
-        with patch.object(reading,'enabled',return_value=local),patch.object(reading_service,'resources_ready',return_value=True):
-            while service.has_work():service.step(editor or Editor())
+        with nullcontext():
+            selected = editor or Editor()
+            if not valid_replies:
+                selected.generate = lambda *args: {}
+            while service.has_work():service.step(selected)
 
     def test_both_topics_and_one_library_entry_per_document(self):
         folder,existed=topics.create_topic('新主题',self.output)
@@ -171,12 +178,12 @@ class ReadingTests(unittest.TestCase):
             writes+=1
             if writes==2:raise SystemExit('模拟写入 TXT 后断电')
             return original_atomic(path,data)
-        with patch.object(reading,'enabled',return_value=False),patch.object(reading_service,'atomic_json',side_effect=fail):
+        with nullcontext(),patch.object(reading_service,'atomic_json',side_effect=fail):
             with self.assertRaises(SystemExit):service.step(Editor())
         draft=library.reading_path(PROJECT_ROOT/job.pages[0].txt)
         self.assertTrue(draft.exists())
         self.run_draft(job)
-        self.assertEqual(job.pages[0].reading_status,'原文排版')
+        self.assertEqual(job.pages[0].reading_status,'完成')
 
     def test_old_library_migration_preserves_bytes_queue_and_record(self):
         job=self.fixture()
@@ -253,7 +260,7 @@ class ReadingTests(unittest.TestCase):
         result=written.organize_chunk(source,Repair())
         self.assertEqual([b['id'] for b in result],[0,1])
         self.assertEqual([b['text'] for b in result],[u['text'] for u in source])
-        self.assertTrue(all(b['mode']=='本地智能整理' for b in result))
+        self.assertTrue(all(b['mode']=='在线智能整理' for b in result))
 
     def test_copied_oral_draft_gets_one_bounded_written_retry(self):
         original='大家好，欢迎回来。我认为预算是100000元，不是10000元。'
@@ -265,7 +272,7 @@ class ReadingTests(unittest.TestCase):
                 return result
         result=written.organize_chunk([dict(id=0,start='00:00',text=original)],Written())
         self.assertEqual(result[0]['text'],'我认为预算是100000元，不是10000元。')
-        self.assertEqual(result[0]['mode'],'本地智能整理')
+        self.assertEqual(result[0]['mode'],'在线智能整理')
 
     def test_old_policy_completed_draft_survives_unavailable_new_policy(self):
         job=self.fixture()
@@ -331,14 +338,14 @@ class ReadingTests(unittest.TestCase):
 
     def test_completed_historical_draft_is_not_automatically_rewritten(self):
         job=self.fixture();self.run_draft(job)
-        with patch.object(reading,'history_enabled',return_value=False):
+        with nullcontext():
             self.scheduler.reading_service.scan()
         self.assertFalse(self.scheduler.reading_service.has_work())
 
     def test_unowned_original_is_not_automatically_rewritten_before_history_validation(self):
         job=self.fixture()
         self.scheduler.jobs=[]
-        with patch.object(reading,'history_enabled',return_value=False):
+        with nullcontext():
             self.scheduler.reading_service.scan()
         self.assertFalse(self.scheduler.reading_service.has_work())
 
@@ -386,17 +393,18 @@ class ReadingTests(unittest.TestCase):
             self.assertEqual(result[0]['text'],original[0]['text'])
             self.assertEqual(result[0]['mode'],'原文排版')
 
-    def test_model_initialization_or_oom_keeps_completed_original_and_exports_layout(self):
-        class OOM(Editor):
-            def start(self,cancel=None):raise RuntimeError('CUDA out of memory')
+    def test_cloud_failure_keeps_original_and_marks_editing_failed(self):
+        class Unavailable(Editor):
+            def start(self,cancel=None):raise RuntimeError('服务不可用')
         job=self.fixture()
-        self.run_draft(job,OOM(),True)
+        original=PROJECT_ROOT/job.pages[0].txt
+        before=original.read_bytes()
+        self.run_draft(job,Unavailable(),True)
         self.assertEqual(job.status,'完成')
-        self.assertTrue((PROJECT_ROOT/job.pages[0].txt).exists())
-        self.assertTrue((PROJECT_ROOT/job.pages[0].reading).exists())
-        raw=textout.read_document(PROJECT_ROOT/job.pages[0].txt)['raw']
-        self.assertEqual(raw['reading']['status'],'原文排版')
-        self.assertIn('CUDA',raw['reading']['model_error'])
+        self.assertEqual(original.read_bytes(),before)
+        raw=textout.read_document(original)['raw']
+        self.assertEqual(raw['reading']['status'],'整理失败')
+        self.assertIn('服务不可用',raw['reading']['error'])
 
     def test_long_unpunctuated_import_is_bounded_without_losing_characters(self):
         source='你好，Hello world 100000元。'*200
@@ -409,7 +417,7 @@ class ReadingTests(unittest.TestCase):
         job=self.fixture(count=2)
         for page in job.pages:
             self.scheduler.reading_service.enqueue((job.jid,page.number))
-        with patch.object(reading,'enabled',return_value=False):
+        with nullcontext():
             while self.scheduler.reading_service.has_work():self.scheduler.reading_service.step(Editor())
         paths=[PROJECT_ROOT/p for page in job.pages for p in (page.txt,page.reading,page.raw)]
         before=[p.read_bytes() for p in paths]
@@ -424,7 +432,7 @@ class ReadingTests(unittest.TestCase):
         service=self.scheduler.reading_service
         service.enqueue((job.jid,1))
         editor=Editor()
-        with patch.object(reading,'enabled',return_value=True),patch.object(reading_service,'resources_ready',return_value=True),patch.object(reading,'chunks',side_effect=lambda units: [units[:2]]):
+        with nullcontext(),patch.object(reading,'chunks',side_effect=lambda units: [units[:2]]):
             service.step(editor)
             initial=textout.read_document(PROJECT_ROOT/job.pages[0].txt)['raw']['reading']['blocks']
             self.assertEqual(len(initial),2)

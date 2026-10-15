@@ -6,7 +6,7 @@ from pathlib import Path
 from .paths import CONFIG_PATH
 
 _LOCK = threading.RLock()
-_DEFAULTS = dict(topic="", cookie="", show_cookie=False, geometry="", show_logs=False, engine='local')
+_DEFAULTS = dict(topic="", cookie="", show_cookie=False, geometry="", show_logs=False, engine='cloud')
 
 
 def read_json(path, default=None):
@@ -30,7 +30,7 @@ def atomic_json(path, data):
 def load_config():
     with _LOCK:
         data = read_json(CONFIG_PATH, {})
-        return {**_DEFAULTS, **(data if isinstance(data, dict) else {})}
+        return {**_DEFAULTS, **(data if isinstance(data, dict) else {}), 'engine': 'cloud'}
 
 
 def save_config(**values):

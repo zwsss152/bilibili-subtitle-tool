@@ -19,6 +19,8 @@ class LocalMediaTests(unittest.TestCase):
         root.mkdir(exist_ok=True)
         self.tmp = tempfile.TemporaryDirectory(dir=root)
         self.addCleanup(self.tmp.cleanup)
+        configured = patch('src.services.scheduler.configured', return_value=True)
+        configured.start(); self.addCleanup(configured.stop)
         self.root = Path(self.tmp.name)
         self.media = self.root / '[0601]第01讲 四格表 #100000.wav'
         with wave.open(str(self.media), 'wb') as stream:
@@ -51,12 +53,11 @@ class LocalMediaTests(unittest.TestCase):
 
     def test_queue_freezes_mode_theme_and_restores_local_job(self):
         service = self.service()
-        self.assertEqual(service.enqueue(str(self.media), '卫生统计', '', 'local')[:2], (1, 0))
-        self.assertEqual(service.enqueue(str(self.media), '其他', '', 'local')[:2], (0, 1))
         with patch('src.services.scheduler.configured', return_value=True):
-            self.assertEqual(service.enqueue(str(self.media), '其他', '', 'cloud')[0], 1)
+            self.assertEqual(service.enqueue(str(self.media), '卫生统计', '')[:2], (1, 0))
+            self.assertEqual(service.enqueue(str(self.media), '其他', '')[:2], (0, 1))
         recovered = self.service()
-        self.assertEqual([(j.engine, j.topic) for j in recovered.jobs], [('local', '卫生统计'), ('cloud', '其他')])
+        self.assertEqual([(j.engine, j.topic) for j in recovered.jobs], [('cloud', '卫生统计')])
         recovered._resolve(recovered.jobs[0])
         self.assertEqual(recovered.jobs[0].title, self.media.stem)
 

@@ -1,5 +1,4 @@
-"""Spawn-safe worker: GPU libraries and the resident model stay out of Tk."""
-import queue
+"""Spawn-safe cloud worker; network requests stay out of Tk."""
 from ..core.net import JobCancelled
 
 
@@ -13,16 +12,12 @@ def worker(inputs, outputs, cancelled):
             return
         identity = request["identity"]
         try:
-            if request.get('engine') == 'cloud':
-                from ..core.cloud import transcribe as cloud_transcribe
-                result = cloud_transcribe(request['audio'], request['checkpoint'],
-                    context=request.get('title',''), progress=lambda pct,msg: outputs.put(('progress',identity,(pct,msg))),
-                    cancel=cancelled.is_set)
-            else:
-                from ..core.asr import transcribe
-                result = transcribe(request["audio"], hotwords=request.get("title", ""),
-                                cancel=cancelled.is_set, log=log,
-                                progress=lambda pct, message: outputs.put(("progress", identity, (pct, message))))
+            if request.get('engine', 'cloud') != 'cloud':
+                raise ValueError('本地模型已移除，请重新加入在线任务')
+            from ..core.cloud import transcribe
+            result = transcribe(request['audio'], request['checkpoint'],
+                context=request.get('title', ''), cancel=cancelled.is_set,
+                progress=lambda pct, msg: outputs.put(('progress', identity, (pct, msg))))
             outputs.put(("result", identity, result))
         except JobCancelled:
             outputs.put(("cancelled", identity, None))

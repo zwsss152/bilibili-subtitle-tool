@@ -3,16 +3,12 @@ import difflib
 import hashlib
 import json
 import re
-from pathlib import Path
 import unicodedata
-from ..config import atomic_json, read_json
-from ..paths import PROJECT_ROOT
 from .documents import record_path
 from .net import check_cancel
 from .textout import add_punctuation
 
 VERSION = 5
-PROFILE = PROJECT_ROOT / '.data' / 'reading-profile.json'
 SYSTEM = '''将口语转录重新编辑成完整、连贯的书面文章。仅加标点、分段而继续照抄口头串场，不符合本任务。
 先理解信息点，再用书面句表达：删除无信息的问候、欢迎、口头填充、重复起句；合并零碎句，纯引出话题的设问改成陈述。保留实际问题与分歧、全部事实、解释、例子细节、个人经历、观点及归属、条件例外、因果和先后顺序。不得摘要、补常识或加结论。
 数字、单位、汉字数量、英文及顺序、专名、书名、引号内原话不改；原词不清楚时保留该词，其余仍应书面化。否定、推测程度和观点主体不改变。代词指代不明确时保留代词，不根据context猜成具体人物姓名。
@@ -94,17 +90,6 @@ def _batch_schema(schema, key, batch):
     if key == 'units':
         array['items']['properties']['text']['minLength'] = 1
     return result
-
-
-def enabled():
-    profile = read_json(PROFILE, {})
-    return (isinstance(profile,dict) and profile.get('version') == VERSION
-            and (profile.get('enabled') is True or profile.get('validated') is True))
-
-
-def history_enabled():
-    profile = read_json(PROFILE, {})
-    return enabled() and profile.get('validated') is True and profile.get('history_enabled') is True
 
 
 def source_units(document):
@@ -255,7 +240,7 @@ def _edit_batch(batch, editor, context, cancel, instruction=''):
             # The stronger independent cloud auditor evaluates negation and
             # stance semantically; literal word counts reject valid paraphrases.
             # Local 8B retains the conservative lexical guard.
-            reason = guard(original['text'], candidate['text'], semantic_audit=getattr(editor,'engine','local') == 'cloud')
+            reason = guard(original['text'], candidate['text'], semantic_audit=getattr(editor,'engine','cloud') == 'cloud')
             heading = candidate['heading'].strip()
             if len(heading) > 30 or '\n' in heading or re.search(r'\d|\[|\]', heading):
                 reason = reason or '小标题格式或事实不可靠'
@@ -314,7 +299,7 @@ def organize_chunk(batch, editor, context='', cancel=None):
             output.append(dict(**unit, heading='', mode='原文排版', reason=reason or '未获得可核对的完整结果'))
         else:
             output.append(dict(**unit, text_original=unit['text'], heading=candidate['heading'].strip(),
-                               information_points=candidate.get('information_points', []), mode='在线智能整理' if getattr(editor,'engine','local') == 'cloud' else '本地智能整理', reason=''))
+                               information_points=candidate.get('information_points', []), mode='在线智能整理', reason=''))
             output[-1]['text'] = format_paragraphs(candidate['text'])
     return output
 
@@ -337,15 +322,13 @@ def format_paragraphs(text):
     return '\n\n'.join(paragraphs)
 
 
-def initial_record(document, strategy='local'):
+def initial_record(document, strategy='cloud'):
     raw = document['raw'] or dict(version=1, title=document['title'], url=document['url'])
     old = raw.get('reading') or {}
     digest = fingerprint(document)
+    if old.get('source_hash') == digest and old.get('status') in ('完成', '原文排版'):
+        return raw  # Preserve a completed draft until the source changes.
     change_strategy = old.get('strategy') != strategy
-    if old.get('strategy') in ('local','cloud') and strategy == 'layout' and old.get('status') in ('完成','原文排版'):
-        change_strategy = False  # Missing resources must not downgrade a valid existing draft.
-        if old.get('source_hash') == digest:
-            return raw  # Keep the previous policy's completed draft until the new one is ready.
     if (old.get('source_hash') != digest or old.get('version') != VERSION or change_strategy
             or old.get('model_error')):
         old = dict(version=VERSION, source_hash=digest, blocks=[], status='待整理', strategy=strategy,
