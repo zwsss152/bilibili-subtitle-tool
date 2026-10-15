@@ -28,14 +28,27 @@ try {
     if (-not (Test-Path -LiteralPath $installerApp)) { throw 'Installed application missing' }
     $installerEvidence.installed = $true
     $installerShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) '文字稿.lnk'
-    $shortcutShell = New-Object -ComObject WScript.Shell
     if (-not (Test-Path -LiteralPath $installerShortcut)) {
         Get-Content -LiteralPath (Join-Path $installerTestRoot 'install.log') | Select-String -Pattern '\.lnk|shortcut'
         throw "Desktop shortcut missing: $installerShortcut"
     }
-    $installerActualTarget = $shortcutShell.CreateShortcut($installerShortcut).TargetPath
-    if ($installerActualTarget -ne $installerApp) {
-        throw "Desktop shortcut target mismatch. Expected: $installerApp ; Actual: $installerActualTarget"
+    # Actually launch the shortcut; WScript.Shell can return an empty TargetPath
+    # for Unicode paths on an English Windows host even when ShellExecute works.
+    $shortcutReport = Join-Path $installerTestRoot 'shortcut-launch.json'
+    $shortcutPreviousData = $env:BILIBILI_SUBTITLE_DATA_DIR
+    try {
+        $env:BILIBILI_SUBTITLE_DATA_DIR = Join-Path $installerTestRoot 'shortcut-user-data'
+        $shortcutProcess = Start-Process -FilePath $installerShortcut -ArgumentList @('--smoke-test', ('"' + $shortcutReport + '"')) -WindowStyle Hidden -PassThru
+        if (-not $shortcutProcess.WaitForExit(60000)) { throw 'Shortcut launch timed out' }
+        if (-not (Test-Path -LiteralPath $shortcutReport)) { throw 'Shortcut did not launch the application self-check' }
+        $shortcutResult = Get-Content -LiteralPath $shortcutReport -Raw | ConvertFrom-Json
+        if (-not $shortcutResult.ok -or -not $shortcutResult.frozen -or
+            $shortcutResult.bundle -ne (Join-Path $installerTarget '_internal')) {
+            throw 'Shortcut launched an unexpected or failing application'
+        }
+        $shortcutProcess.Dispose()
+    } finally {
+        $env:BILIBILI_SUBTITLE_DATA_DIR = $shortcutPreviousData
     }
     $installerEvidence.shortcut = $true
     & (Join-Path $PSScriptRoot 'test_packaged.ps1') -Exe $installerApp -Reports (Join-Path $installerTestRoot 'checks')
