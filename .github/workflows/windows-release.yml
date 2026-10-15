@@ -69,5 +69,11 @@ jobs:
           $setup = (Get-ChildItem artifacts -Recurse -Filter 'BilibiliSubtitleTool-Setup-*-x64.exe').FullName
           $hash = "$setup.sha256"
           $notes = 'Windows x64 installation package. Includes Python, Tk, FFmpeg and WebView2 offline runtime. Users supply their own Bailian API key and choose models in Settings. Build, offline component and installer lifecycle checks passed; clean Windows VM and real cloud acceptance must be recorded before publishing this draft.'
-          gh release create $env:GITHUB_REF_NAME $setup $hash --repo $env:GH_REPO --target $env:GITHUB_SHA --draft --title "文字稿 $env:GITHUB_REF_NAME" --notes $notes
+          $existing = gh release view $env:GITHUB_REF_NAME --repo $env:GH_REPO --json isDraft --jq .isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if ($existing.Trim() -ne 'true') { throw 'Published releases are immutable; use a new version tag' }
+            gh release upload $env:GITHUB_REF_NAME $setup $hash --repo $env:GH_REPO --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME $setup $hash --repo $env:GH_REPO --target $env:GITHUB_SHA --draft --title "文字稿 $env:GITHUB_REF_NAME" --notes $notes
+          }
           if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }

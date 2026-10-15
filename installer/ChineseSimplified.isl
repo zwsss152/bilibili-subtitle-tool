@@ -1,4 +1,4 @@
-; Simplified Chinese messages for this application's installer.
+﻿; Simplified Chinese messages for this application's installer.
 ; Unlisted uncommon error messages inherit Inno Setup's English defaults.
 [LangOptions]
 LanguageName=简体中文

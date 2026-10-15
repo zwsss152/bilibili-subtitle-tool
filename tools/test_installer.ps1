@@ -9,8 +9,8 @@ if (Test-Path -LiteralPath (Join-Path ([Environment]::GetFolderPath('Desktop')) 
 }
 $installerRoot = Split-Path $PSScriptRoot -Parent
 $installerRunId = [guid]::NewGuid().ToString('N')
-$installerTestRoot = Join-Path $installerRoot ('tests\.artifacts\installer-' + $installerRunId)
-$installerTarget = Join-Path $installerTestRoot '安装目录 with spaces'
+$installerTestRoot = Join-Path $installerRoot ('release\checks\installer-' + $installerRunId)
+$installerTarget = Join-Path $installerRoot ('tests\.artifacts\install-' + $installerRunId + '\安装目录 with spaces')
 $installerData = Join-Path $env:LOCALAPPDATA 'BilibiliSubtitleTool'
 New-Item -ItemType Directory -Path $installerTestRoot, $installerData -Force | Out-Null
 $installerSentinel = Join-Path $installerData ('.installer-check-' + $installerRunId)
@@ -29,7 +29,14 @@ try {
     $installerEvidence.installed = $true
     $installerShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) '文字稿.lnk'
     $shortcutShell = New-Object -ComObject WScript.Shell
-    if ($shortcutShell.CreateShortcut($installerShortcut).TargetPath -ne $installerApp) { throw 'Desktop shortcut target mismatch' }
+    if (-not (Test-Path -LiteralPath $installerShortcut)) {
+        Get-Content -LiteralPath (Join-Path $installerTestRoot 'install.log') | Select-String -Pattern '\.lnk|shortcut'
+        throw "Desktop shortcut missing: $installerShortcut"
+    }
+    $installerActualTarget = $shortcutShell.CreateShortcut($installerShortcut).TargetPath
+    if ($installerActualTarget -ne $installerApp) {
+        throw "Desktop shortcut target mismatch. Expected: $installerApp ; Actual: $installerActualTarget"
+    }
     $installerEvidence.shortcut = $true
     & (Join-Path $PSScriptRoot 'test_packaged.ps1') -Exe $installerApp -Reports (Join-Path $installerTestRoot 'checks')
     Run-InstallerProcess $installerSetup @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', ('/DIR="' + $installerTarget + '"'))
