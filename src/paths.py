@@ -1,11 +1,33 @@
-"""All application data belongs to this checkout."""
+"""Separate immutable application resources from writable user data."""
+import os
+import sys
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+APP_ID = 'BilibiliSubtitleTool'
+
+
+def application_paths(*, frozen=None, bundle=None, local_app_data=None, override=None):
+    frozen = bool(getattr(sys, 'frozen', False)) if frozen is None else frozen
+    resources = Path(bundle or getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[1])).resolve()
+    override = os.environ.get('BILIBILI_SUBTITLE_DATA_DIR') if override is None else override
+    if override:
+        data = Path(override).expanduser()
+        if not data.is_absolute():
+            raise ValueError('数据目录必须使用完整路径')
+    elif frozen:
+        data = Path(local_app_data or os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local') / APP_ID
+    else:
+        data = resources
+    return resources, data.resolve()
+
+
+BUNDLE_ROOT, DATA_ROOT = application_paths()
+# Compatibility name for persisted paths and existing ownership checks.
+PROJECT_ROOT = DATA_ROOT
 OUTPUT_ROOT = PROJECT_ROOT / "文字稿"
 RECORDS_DIR = PROJECT_ROOT / '.data' / 'transcripts'
 ASR_CACHE_DIR = PROJECT_ROOT / "asr_cache"
-ASSETS_DIR = PROJECT_ROOT / "assets"
+ASSETS_DIR = BUNDLE_ROOT / "assets"
 APP_ICON = ASSETS_DIR / "视频列表.ico"
 CONFIG_PATH = PROJECT_ROOT / "app_config.json"
 QUEUE_STATE_PATH = PROJECT_ROOT / "queue_state.json"

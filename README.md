@@ -1,15 +1,17 @@
 # 文字稿 · B 站、抖音、机核与本地媒体
 
-Windows 桌面转录工具，Python + Tkinter。识别、阅读稿整理和独立信息核对全部使用阿里云百炼，无需显卡、CUDA 或本地 AI 模型。
+Windows 桌面转录工具。安装版自带运行环境，不需要安装 Python、运行命令或下载模型。识别与阅读稿整理使用用户自己的百炼账户。
 
 支持批量队列、B 站多分 P、抖音分享链接、机核电台、本地视频/音频、主题归档、时间戳原稿、阅读稿、断点恢复和稿件重命名。
 
 ## 安装与启动
 
-1. 安装 Windows 64 位 Python 3.13，并启用 Python Launcher。
-2. 双击 **安装环境.bat**，根据 `requirements.lock.txt` 安装依赖。
-3. 双击 **启动.bat**（或 **批量转写.bat**）。
-4. 打开“设置”，填写北京地域的百炼 API Key；如使用专属业务空间，可填写业务空间 ID。密钥使用 Windows DPAPI 加密保存在本机，留空保存保留现有密钥。也可使用 `DASHSCOPE_API_KEY` 环境变量。
+1. 从 [GitHub Releases](https://github.com/zwsss152/bilibili-subtitle-tool/releases) 下载 `BilibiliSubtitleTool-Setup-版本号-x64.exe`。首个安装版目前为验收候选，尚未正式发布；Release 页面没有安装包时，请不要把源码 ZIP 当作安装包。
+2. 双击安装，完成后使用桌面或开始菜单中的“文字稿”快捷方式。
+3. 首次打开按引导填写你自己的北京地域百炼 API Key；业务空间 ID 按需填写。
+4. 设置中的“模型选择”分别配置语音识别、阅读稿整理和内容核对；可获取模型列表或输入兼容模型的 ID，然后保存。
+
+支持 Windows 10 22H2 / Windows 11 x64，安装包包含 Python、Tk、FFmpeg 和微软 WebView2 离线组件。按当前用户安装，不更改系统 Python。安装包没有内置 API Key，密钥使用 Windows DPAPI 加密保存；留空保存保留现有密钥。也支持 `DASHSCOPE_API_KEY` 环境变量。
 
 首次使用需自行开通服务并确保模型权限及账户余额。音频、标题/简介与待整理文字会发送到百炼，调用可能产生费用；平台 Cookie 不发送给模型服务。
 
@@ -25,7 +27,9 @@ Windows 桌面转录工具，Python + Tkinter。识别、阅读稿整理和独�
 
 ## 处理与数据
 
-识别使用 `qwen-audio-3.0-asr-flash`，两分钟音频分块直传；整理使用 `qwen3.5-plus`，再由 `qwen3-max` 核对信息。模型调用失败明确显示错误；无法通过内容核对的段落保留原文排版。自动核对不能保证零遗漏。
+默认识别 `qwen-audio-3.0-asr-flash`，两分钟音频分块直传；默认整理 `qwen3.8-flash`，再由 `qwen3.8-max` 核对信息。用户可自行选择。识别还支持 Qwen3-ASR-Flash 和 Fun-ASR-Flash 的同步调用及兼容日期快照；实时、filetrans 和其他厂商协议暂不支持。Qwen3-ASR 没有词级时间时按分块标时。列表可见不代表账户已开通该模型。模型不可用明确报错，不静默更换模型。已入队任务保持其模型配置，新设置用于新任务和新整理请求。自动核对不能保证零遗漏。
+
+安装程序默认位置为 `%LOCALAPPDATA%\Programs\BilibiliSubtitleTool`，个人数据独立保存在 `%LOCALAPPDATA%\BilibiliSubtitleTool`。下面所有个人数据路径均相对于这个数据目录；源码运行时仍相对于源码目录。
 
 - `文字稿/时间戳原稿/主题/*.txt`：含来源与时间戳的原稿。
 - `文字稿/整理阅读稿/主题/*.txt`：手动整理生成的同名阅读稿。
@@ -37,11 +41,15 @@ Windows 桌面转录工具，Python + Tkinter。识别、阅读稿整理和独�
 
 ## 从本地模型版升级
 
+安装版不会自动扫描或导入旧源码目录。旧目录和原稿保留原状；第一版需要继续查看旧稿时，可先使用旧源码版。后续覆盖安装新版只替换程序，卸载保留个人数据。若要在源码版中升级，可按下面步骤操作。
+
 先备份稿件、`.data/`、队列和配置，再更新源码。旧本地未完成任务保留并提示重试；填写密钥、点击重试后才转为在线处理。已完成稿件保留；旧本地整理请求不会因升级自动上传。历史稿件需选中后点击“整理”。
 
 新安装不包含本地模型依赖；覆盖旧目录不会自动卸载旧 GPU 包或删除模型。建议在新目录安装以获得轻量环境。换机时应重新填写 API Key。
 
 ## 开发和诊断
+
+普通用户使用开始菜单中的“文字稿 · 环境诊断”，或在设置中打开日志文件夹。开发者运行源码需安装 Python 3.13，并运行 `安装环境.bat` 创建项目环境。GitHub 的“Download ZIP”仅提供源码，不包含运行环境。
 
 ```powershell
 .venv\Scripts\python.exe -B -m unittest discover -s tests -v
@@ -49,5 +57,7 @@ Windows 桌面转录工具，Python + Tkinter。识别、阅读稿整理和独�
 ```
 
 单元测试模拟在线接口，不需要真实密钥，也不会产生模型费用。`src/ui` 管理界面，`src/services` 管理队列和生命周期，`src/core` 管理平台、下载、云端接口与稿件处理。
+
+安装包的构建、测试、数据位置和发布门槛见 [Windows 安装版](docs/windows-installer.md)。
 
 完整项目分析、优化优先级及迁移说明见 [云端迁移与优化评估](docs/cloud-migration.md)，本次验证见 [验证记录](docs/cloud-validation.md)。其余验收文档和 `benchmarks/` 保留为历史资料，不能视为当前云端版的实测结果。

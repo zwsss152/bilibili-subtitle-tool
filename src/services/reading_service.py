@@ -11,7 +11,7 @@ from ..core import reading
 from ..core.documents import record_path
 from ..core.library import originals, reading_path
 from ..core.cloud import EDITOR_MODEL as MODEL_NAME
-from ..core.cloud import configured
+from ..core.cloud import configured, model_settings, CloudClient
 from ..core.net import JobCancelled, check_cancel
 from ..core.textout import read_document
 
@@ -80,6 +80,7 @@ class ReadingService:
                     return False
             raw['reading_requested'] = True
             raw['reading_engine'] = 'cloud'
+            raw['reading_models'] = model_settings()
             if progress.get('status') not in ('写入中', '整理中'):
                 progress['status'] = '待整理'
             raw['reading'] = progress
@@ -129,6 +130,14 @@ class ReadingService:
                 strategy = 'cloud'
                 record = reading.initial_record(document, strategy)
                 progress = record['reading']
+                models = (document['raw'] or {}).get('reading_models') or (job.cloud_models if job else None) or model_settings()
+                if isinstance(editor, CloudClient):
+                    if editor.models != models:
+                        editor.close()
+                        editor.__init__(models=models)
+                if (progress.get('models') != models and progress.get('status') not in ('完成', '原文排版')):
+                    progress['blocks'] = []
+                progress['models'] = models
                 destination = reading_path(path)
                 if progress.get('status') in ('完成', '原文排版') and destination.is_file():
                     if page:
@@ -148,6 +157,7 @@ class ReadingService:
             if batch:
                 editor.start(cancel)
                 progress.update(model=getattr(editor, 'model_name', MODEL_NAME),
+                                review_model=getattr(editor, 'review_model', models['review_model']),
                                 model_revision=getattr(editor, 'model_revision', MODEL_REVISION),
                                 runtime='百炼 HTTP', device='cloud')
             context = units[len(blocks)-1]['text'][-300:] if blocks else ''

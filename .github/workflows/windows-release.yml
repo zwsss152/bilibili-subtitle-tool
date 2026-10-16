@@ -1,0 +1,90 @@
+name: Windows installer
+
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.16'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock.txt
+            requirements-build.txt
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Read application version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (python -c 'from src.version import VERSION; print(VERSION)').Trim()
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Check release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $version = (python -c 'from src.version import VERSION; print(VERSION)').Trim()
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag and application version disagree' }
+      - name: Build and check installer
+        shell: pwsh
+        run: ./tools/build_release.ps1
+      - name: Install, overinstall and uninstall
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem release/BilibiliSubtitleTool-Setup-*-x64.exe).FullName
+          ./tools/test_installer.ps1 -Setup $setup
+      - name: Upload installer and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-installer
+          path: |
+            release/
+            tests/.artifacts/installer-*/
+          if-no-files-found: error
+
+  draft-release:
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'codex/windows-installer' && github.event.pull_request.head.repo.full_name == github.repository)
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-x64-installer
+          path: artifacts
+      - name: Create draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: v${{ needs.build.outputs.version }}${{ github.event_name == 'pull_request' && '-rc.1' || '' }}
+          RELEASE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          $setup = (Get-ChildItem artifacts -Recurse -Filter 'BilibiliSubtitleTool-Setup-*-x64.exe').FullName
+          $hash = "$setup.sha256"
+          $notes = 'Windows x64 installation candidate. Includes Python, Tk, FFmpeg and WebView2 offline runtime. Users supply their own Bailian API key and choose models in Settings. Build, offline component and installer lifecycle checks passed. Real cloud recognition, editing and review passed on a short synthetic audio sample with user-authorized credentials; no credentials are included. Clean Windows 10/11 VM and cross-version upgrade validation remain pending. Keep this candidate as a draft until those checks pass.'
+          $existing = gh release view $env:RELEASE_TAG --repo $env:GH_REPO --json isDraft --jq .isDraft 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            if ($existing.Trim() -ne 'true') { throw 'Published releases are immutable; use a new version tag' }
+            gh release upload $env:RELEASE_TAG $setup $hash --repo $env:GH_REPO --clobber
+          } else {
+            gh release create $env:RELEASE_TAG $setup $hash --repo $env:GH_REPO --target $env:RELEASE_COMMIT --draft --title "文字稿 $env:RELEASE_TAG · Windows 安装版候选" --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }
+

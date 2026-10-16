@@ -14,9 +14,10 @@ def worker(inputs, outputs, cancelled):
         try:
             if request.get('engine', 'cloud') != 'cloud':
                 raise ValueError('本地模型已移除，请重新加入在线任务')
-            from ..core.cloud import transcribe
+            from ..core.cloud import transcribe, CloudClient
             result = transcribe(request['audio'], request['checkpoint'],
                 context=request.get('title', ''), cancel=cancelled.is_set,
+                client=CloudClient(models=request.get('cloud_models') or None),
                 progress=lambda pct, msg: outputs.put(('progress', identity, (pct, msg))))
             outputs.put(("result", identity, result))
         except JobCancelled:
