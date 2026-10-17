@@ -187,4 +187,3 @@ def run_check(args):
         report.update(ok=False, error=traceback.format_exc())
     atomic_json(Path(destination).resolve(), report)
     return 0 if report['ok'] else 1
-
