@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from src.core import cloud
 from src.services.recognizer import worker
-from src.paths import canonical_data_root
+from src.core import rename
 
 
 class CloudDiagnosticsTests(unittest.TestCase):
@@ -20,9 +20,14 @@ class CloudDiagnosticsTests(unittest.TestCase):
             local = Path(folder)
             data = local / 'BilibiliSubtitleTool'
             redirected = local / 'Packages' / 'SomeApp_family' / 'LocalCache' / 'Local' / 'BilibiliSubtitleTool'
-            self.assertEqual(canonical_data_root(data, redirected/'queue_state.json'), redirected)
-            self.assertEqual(canonical_data_root(data, local/'outside'/'queue_state.json'), data)
-            self.assertEqual(canonical_data_root(data, local/'Packages'/'anything'/'queue_state.json'), data)
+            original_resolve = Path.resolve
+            requested = data / 'queue_state.json'
+            def resolve(path, *args, **kwargs):
+                return redirected/'queue_state.json' if path == requested else original_resolve(path, *args, **kwargs)
+            with patch.object(rename, 'PROJECT_ROOT', data), patch.object(Path, 'resolve', resolve):
+                self.assertTrue(rename._folder(requested).is_relative_to(data))
+                with self.assertRaises(ValueError):
+                    rename._folder(local/'outside'/'queue_state.json')
 
     def request_error(self, body, status=400):
         return urllib.error.HTTPError('https://dashscope.aliyuncs.com/api', status, 'bad',
