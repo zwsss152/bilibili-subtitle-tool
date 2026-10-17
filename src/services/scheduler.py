@@ -1,5 +1,6 @@
 """A network preparation thread and one persistent, replaceable ASR process."""
 import json
+import logging
 import multiprocessing as mp
 from pathlib import Path
 import queue
@@ -503,6 +504,10 @@ class Scheduler:
                     if event == "log":
                         self.log(value)
                         continue
+                    if event == 'diagnostic':
+                        logging.getLogger('transcripts').error('worker_diagnostic %s', json.dumps(
+                            dict(job_id=result_identity[0], page=result_identity[1], **value), ensure_ascii=False))
+                        continue
                     if tuple(result_identity) != identity:
                         continue
                     if event == "progress":
@@ -538,6 +543,9 @@ class Scheduler:
                 event, identity, value = self.outputs.get_nowait()
                 if event == "log":
                     self.log(value)
+                elif event == 'diagnostic':
+                    logging.getLogger('transcripts').error('worker_diagnostic %s', json.dumps(
+                        dict(job_id=identity[0], page=identity[1], **value), ensure_ascii=False))
         except queue.Empty:
             pass
 

@@ -99,21 +99,62 @@ def _self_test():
 
 def _smoke_test():
     from .ui.batch_app import BatchApp
+    from .ui import kit
+    from .core import cloud
+    import tempfile
+    def children(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from children(child)
     app = BatchApp(autostart=False)
-    app.withdraw()
+    # A transient settings window is unmapped when its owner is withdrawn.
+    # Keep the owner mapped so clipping checks exercise real window geometry.
+    app.geometry('960x640+20+20')
     failures = []
     app.report_callback_exception = lambda *args: failures.append(str(args[1]))
     try:
         app.update_idletasks()
-        app.settings()
-        app.update_idletasks()
+        original_secret, original_settings = cloud.SECRET, cloud.SETTINGS
+        with tempfile.TemporaryDirectory() as folder:
+            cloud.SECRET = Path(folder) / 'key.dpapi'
+            cloud.SETTINGS = Path(folder) / 'settings.json'
+            try:
+                for scale in (1, 1.5, 2):
+                    app.tk.call('tk', 'scaling', 96 / 72 * scale)
+                    window = app.settings()
+                    app.update()
+                    save = next(w for w in children(window) if isinstance(w, kit.RoundedButton) and w._text == '保存设置')
+                    if not save.winfo_ismapped() or save.winfo_height() < 20 or (
+                            save.winfo_rooty() + save.winfo_height() > window.winfo_rooty() + window.winfo_height()):
+                        raise RuntimeError('Settings Save button is clipped')
+                    if scale == 1:
+                        save._command()
+                        if not window.winfo_exists() or cloud.configured():
+                            raise RuntimeError('Empty credentials were accepted')
+                        field = next(w for w in children(window) if isinstance(w, kit.TextField))
+                        field.set('fake-offline-gui-test-key')
+                    save._command()
+                    if window.winfo_exists() or cloud.key_value() != 'fake-offline-gui-test-key':
+                        raise RuntimeError('Settings did not persist encrypted credentials')
+                calls = []
+                enqueue = app.scheduler.enqueue
+                app.scheduler.enqueue = lambda *args: (calls.append(args) or (1, 0, []))
+                try:
+                    app.enqueue('BV1testonly')
+                    if len(calls) != 1:
+                        raise RuntimeError('Saved credentials still redirect enqueue to settings')
+                finally:
+                    app.scheduler.enqueue = enqueue
+            finally:
+                cloud.SECRET, cloud.SETTINGS = original_secret, original_settings
         app._save_settings()
         title = app.title()
     finally:
         app.close()
     if failures:
         raise RuntimeError('; '.join(failures))
-    return dict(tk_window=True, settings=True, title=title, shutdown=True)
+    return dict(tk_window=True, settings=True, settings_save_visible=True,
+                encrypted_settings_roundtrip=True, configured_enqueue=True, title=title, shutdown=True)
 
 
 def run_check(args):

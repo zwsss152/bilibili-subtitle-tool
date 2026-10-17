@@ -42,8 +42,12 @@ def _owned(path, record=False):
 
 
 def _folder(state_path):
-    state_path = Path(state_path).resolve()
-    if not state_path.is_relative_to(PROJECT_ROOT):
+    requested = Path(state_path)
+    # Windows can report a package-cache name for an ordinary AppData file
+    # handle. Check its canonical parent, retaining the ordinary file name;
+    # actual symlinks still require validation against their final target.
+    state_path = requested.resolve() if requested.is_symlink() else requested.parent.resolve() / requested.name
+    if not state_path.is_relative_to(PROJECT_ROOT.resolve()):
         raise ValueError('队列路径超出项目目录')
     key = hashlib.sha256(str(state_path).casefold().encode()).hexdigest()
     return PROJECT_ROOT / '.data' / 'renames' / key

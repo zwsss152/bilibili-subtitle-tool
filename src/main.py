@@ -28,11 +28,16 @@ def acquire_instance():
 
 
 def setup_logging():
-    handler = RotatingFileHandler(LOGS_DIR / "app.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    handler = RotatingFileHandler(LOGS_DIR / "app.log", maxBytes=5_000_000, backupCount=5, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s pid=%(process)d %(name)s %(message)s"))
     logger = logging.getLogger("transcripts")
     logger.setLevel(logging.INFO)
+    for old in list(logger.handlers):
+        logger.removeHandler(old)
+        old.close()
     logger.addHandler(handler)
+    from .version import VERSION
+    logger.info('启动 文字稿 %s；日志目录：%s', VERSION, LOGS_DIR)
 
 
 def main():

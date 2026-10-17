@@ -9,6 +9,7 @@ from ctypes import wintypes
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -61,8 +62,9 @@ def available_models(key='', workspace=''):
     if workspace and not re.fullmatch(r'[A-Za-z0-9-]{1,100}', workspace):
         raise ValueError('业务空间 ID 只能包含字母、数字和短横线')
     base = 'https://' + (workspace + '.cn-beijing.maas.aliyuncs.com' if workspace else 'dashscope.aliyuncs.com')
+    credential = key.strip() or key_value()
     request = urllib.request.Request(base + '/compatible-mode/v1/models',
-        headers={'Authorization': 'Bearer ' + (key.strip() or key_value())})
+        headers={'Authorization': 'Bearer ' + credential})
     try:
         with urllib.request.build_opener(_NoRedirect()).open(request, timeout=20) as response:
             payload = response.read(2 * 1024 * 1024 + 1)
@@ -76,9 +78,17 @@ def available_models(key='', workspace=''):
             word in model.lower() for word in ('audio', 'asr', 'realtime', 'image', 'embedding', 'rerank', 'tts', 'omni', 'mt-'))]
         return dict(asr_model=asr, editor_model=text, review_model=text)
     except urllib.error.HTTPError as exc:
-        status = exc.code
-        exc.close()
-        raise CloudError(_error_message(status=status)) from None
+        try:
+            raw = exc.read(65536)
+            try:
+                detail = json.loads(raw)
+            except (ValueError, UnicodeError):
+                detail = dict(message=raw.decode('utf-8', errors='replace'))
+            message, metadata = service_error(detail, exc.code, exc.headers, (credential,))
+            logging.getLogger('transcripts.cloud').error('model_catalog_failed %s', json.dumps(metadata, ensure_ascii=False))
+        finally:
+            exc.close()
+        raise CloudError(message) from None
     except (OSError, ValueError, TypeError, AttributeError):
         raise CloudError('无法获取模型列表，请检查网络或手动填写模型 ID') from None
 
@@ -87,6 +97,47 @@ class CloudError(RuntimeError):
     def __init__(self, message, retryable=False):
         super().__init__(message)
         self.retryable = retryable
+
+
+def safe_diagnostic(value, secrets=(), limit=1600):
+    """Bound service text and remove credentials/embedded media before logging."""
+    text = str(value)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, '[REDACTED]')
+    text = re.sub(r'data:[^\s"\']+', '[MEDIA REDACTED]', text, flags=re.I)
+    text = re.sub(r'(?i)\bsk-[A-Za-z0-9_.-]+', '[REDACTED]', text)
+    text = re.sub(r'(?i)(authorization|cookie|api[_-]?key|access[_-]?token|password)["\s]*[:=][^\r\n]+', r'\1=[REDACTED]', text)
+    text = re.sub(r'(?i)Bearer\s+\S+', 'Bearer [REDACTED]', text)
+    text = re.sub(r'https?://[^\s"\']+', '[URL REDACTED]', text)
+    text = re.sub(r'[A-Za-z0-9+/=_-]{160,}', '[LONG DATA REDACTED]', text)
+    text = ''.join(c if c >= ' ' else ' ' for c in text)
+    return text[:limit] + (' [truncated]' if len(text) > limit else '')
+
+
+def service_error(detail, status=0, headers=None, secrets=()):
+    """Only retain diagnostic fields; never serialize a response/request body."""
+    if not isinstance(detail, dict):
+        detail = dict(message=detail)
+    nested = detail.get('error')
+    nested = nested if isinstance(nested, dict) else {}
+    headers = headers or {}
+    code = safe_diagnostic(detail.get('code') or nested.get('code') or '', secrets, 160)
+    message = safe_diagnostic(detail.get('message') or nested.get('message') or (detail.get('error') if isinstance(detail.get('error'), str) else '') or '', secrets)
+    if status in (401, 403) or any(term in code.lower() for term in ('invalidapikey', 'unauthorized', 'accessdenied')):
+        message = '鉴权失败；服务原文已隐藏，避免回显凭据'
+    elif not message:
+        message = '服务未提供错误说明'
+    request_id = safe_diagnostic(detail.get('request_id') or detail.get('requestId') or headers.get('x-request-id') or headers.get('x-dashscope-request-id') or '', secrets, 160)
+    metadata = dict(http_status=status, code=code, message=message, request_id=request_id)
+    summary = _error_message(code, status)
+    if code:
+        summary += '；错误码：' + code
+    if message:
+        summary += '；服务说明：' + message
+    if request_id:
+        summary += '；请求 ID：' + request_id
+    return summary, metadata
 
 
 def _error_message(code='', status=0):
@@ -183,13 +234,22 @@ class CloudClient:
     device = 'cloud'
     process = None
 
-    def __init__(self, transport=None, models=None):
+    def __init__(self, transport=None, models=None, diagnostic=None):
         self.transport = transport
         self.response = None
+        self.diagnostic = diagnostic
+        self.request_context = {}
         self.models = normalize_models(models if models is not None else model_settings())
         self.asr_model = self.models['asr_model']
         self.model_name = self.models['editor_model']
         self.review_model = self.models['review_model']
+
+    def _diagnose(self, metadata):
+        metadata = dict(event='cloud_request_failed', **self.request_context, **metadata)
+        if self.diagnostic is not None:
+            self.diagnostic(metadata)
+        else:
+            logging.getLogger('transcripts.cloud').error('%s', json.dumps(metadata, ensure_ascii=False))
 
     def start(self, cancel=None):
         check_cancel(cancel)
@@ -209,7 +269,8 @@ class CloudClient:
         check_cancel(cancel)
         if self.transport is not None:
             return self.transport(endpoint, payload, streaming)
-        headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key_value()}
+        credential = key_value()
+        headers = {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + credential}
         if endpoint.startswith('/api/v1/'):
             headers['X-DashScope-SSE'] = 'enable' if streaming else 'disable'
         request = urllib.request.Request(self._base() + endpoint,
@@ -241,24 +302,33 @@ class CloudClient:
                     raise CloudError('在线响应为空，未使用不完整结果')
                 for item in results:
                     if item.get('code') or item.get('error'):
-                        error_value = item.get('error')
-                        code = item.get('code') or (error_value.get('code','') if isinstance(error_value,dict) else '')
-                        raise CloudError(_error_message(code))
+                        message, metadata = service_error(item, secrets=(credential,))
+                        self._diagnose(dict(metadata, endpoint=endpoint, model=payload.get('model'), attempt=attempt+1, response_kind='service_error'))
+                        raise CloudError(message)
                 return results
             except urllib.error.HTTPError as exc:
                 retryable = exc.code == 429 or exc.code >= 500
                 try:
-                    detail = json.loads(exc.read(65536))
-                    code = detail.get('code') or (detail.get('error') or {}).get('code','')
-                except (ValueError,AttributeError,OSError):
-                    code = ''
+                    raw = exc.read(65537)
+                    try:
+                        detail = json.loads(raw[:65536])
+                    except (ValueError, UnicodeError):
+                        detail = dict(message=raw[:65536].decode('utf-8', errors='replace'))
+                    message, metadata = service_error(detail, exc.code, exc.headers, (credential,))
+                    metadata['body_truncated'] = len(raw) > 65536
+                except OSError as read_error:
+                    message, metadata = service_error(dict(message='错误响应读取失败：' + safe_diagnostic(read_error, (credential,))), exc.code, exc.headers, (credential,))
                 finally:
                     exc.close()
-                error = CloudError(_error_message(code, exc.code), retryable)
-            except (OSError, urllib.error.URLError):
-                error = CloudError('在线连接中断或超时，已完成分块已保留', True)
-            except (ValueError, UnicodeError):
-                raise CloudError('在线响应格式异常，未使用不完整结果') from None
+                self._diagnose(dict(metadata, endpoint=endpoint, model=payload.get('model'), attempt=attempt+1, retryable=retryable))
+                error = CloudError(message, retryable)
+            except (OSError, urllib.error.URLError) as exc:
+                reason = safe_diagnostic(exc, (credential,))
+                self._diagnose(dict(endpoint=endpoint, model=payload.get('model'), attempt=attempt+1, exception=type(exc).__name__, message=reason, retryable=True))
+                error = CloudError('在线连接中断或超时，已完成分块已保留；' + reason, True)
+            except (ValueError, UnicodeError) as exc:
+                self._diagnose(dict(endpoint=endpoint, model=payload.get('model'), attempt=attempt+1, exception=type(exc).__name__, message=safe_diagnostic(exc, (credential,))))
+                raise CloudError('在线响应格式异常，未使用不完整结果；' + safe_diagnostic(exc, (credential,))) from None
             finally:
                 self.close()
             check_cancel(cancel)
@@ -471,16 +541,24 @@ def transcribe(audio_path, checkpoint, context='', progress=lambda *a:None, canc
         raise CloudError('识别续作记录损坏，请保留记录并检查')
     ffmpeg = find_ffmpeg()
     started = time.perf_counter()
+    def recognize_chunk(wav, index, start, end, phase):
+        if isinstance(client, CloudClient):
+            client.request_context = dict(block=index+1, total_blocks=count, start_seconds=start,
+                                         end_seconds=end, wav_bytes=len(wav), phase=phase)
+        try:
+            return client.recognize(wav, context, cancel)
+        except CloudError as exc:
+            raise CloudError(f'第 {index+1}/{count} 块（{start:.1f}–{end:.1f} 秒）：{exc}', exc.retryable) from None
     for index in range(len(state['blocks']), count):
         check_cancel(cancel)
         core_start, core_end = index * 120, min(duration, (index+1)*120)
         start, end = max(0,core_start-2), min(duration,core_end+2)
         wav = _audio_chunk(audio_path,start,end-start,ffmpeg,cancel)
-        result = client.recognize(wav, context, cancel)
+        result = recognize_chunk(wav, index, start, end, 'initial')
         from .chinese_review import damaged
         for attempt in range(1):
             if damaged(result['text']):
-                result = client.recognize(wav, context, cancel)
+                result = recognize_chunk(wav, index, start, end, 'damaged_text_retry')
         if damaged(result['text']):
             raise CloudError('在线识别仍含缺损字符，本分块未保存为成功')
         _check_duration(result, end-start)
@@ -496,7 +574,7 @@ def transcribe(audio_path, checkpoint, context='', progress=lambda *a:None, canc
             # text. The original time range is explicitly stored in the record.
             if start != core_start or end != core_end:
                 wav = _audio_chunk(audio_path,core_start,core_end-core_start,ffmpeg,cancel)
-                result = client.recognize(wav, context, cancel)
+                result = recognize_chunk(wav, index, core_start, core_end, 'without_overlap')
                 if damaged(result['text']):
                     raise CloudError('在线识别仍含异常字符，本分块未保存为成功')
                 _check_duration(result, core_end-core_start)

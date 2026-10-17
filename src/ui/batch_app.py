@@ -257,7 +257,7 @@ class BatchApp(tk.Tk):
         from ..core.cloud import configured
         if engine == 'cloud' and not configured():
             self.status_var.set('请先填写百炼 API Key；输入一次即可自动使用在线方式')
-            self.settings()
+            self.settings(on_saved=lambda: self.enqueue(raw))
             return
         added, duplicates, errors = self.scheduler.enqueue(raw, self.topic_var.get(), self.cookie_var.get(), engine)
         if added:
@@ -596,16 +596,24 @@ class BatchApp(tk.Tk):
                 '点击“确定”打开设置；也可以稍后从右上角设置中填写。', parent=self):
             self.settings()
 
-    def settings(self):
+    def settings(self, on_saved=None):
         from ..core import cloud
+        existing = getattr(self, '_settings_window', None)
+        if existing is not None and existing.winfo_exists():
+            if on_saved is not None:
+                existing._on_saved = on_saved
+            existing.lift()
+            existing.focus_set()
+            return existing
         window = tk.Toplevel(self)
+        window._on_saved = on_saved
+        self._settings_window = window
         window.title('设置 · 云端服务与模型')
         window.geometry('720x680')
         window.minsize(680, 640)
         window.configure(bg=ui.T.bg)
         window.transient(self)
         notebook = ttk.Notebook(window)
-        notebook.pack(fill='both', expand=True, padx=16, pady=(16, 8))
         tabs = {}
         for title in ('云端服务', '模型选择', '平台与应用'):
             frame = tk.Frame(notebook, bg=ui.T.bg, padx=18, pady=16)
@@ -620,7 +628,7 @@ class BatchApp(tk.Tk):
         key_field = ui.TextField(body, textvariable=key, width=560)
         key_field.entry.configure(show='•')
         key_field.pack(fill='x', pady=(8, 4))
-        state = '已配置；留空保留原密钥。' if cloud.configured() else '尚未配置；填写后保存在本机，使用 Windows 加密。'
+        state = '✓ 密钥已保存；安全起见不回显，留空保留原密钥。' if cloud.configured() else '尚未保存密钥；填写后请点击底部“保存设置”。'
         self.label(body, state, 9, color=ui.T.text2).pack(anchor='w')
         self.label(body, '业务空间 ID（可选）', 10, True).pack(anchor='w', pady=(20, 8))
         workspace = tk.StringVar(value=cloud.read_json(cloud.SETTINGS, {}).get('workspace', ''))
@@ -690,20 +698,29 @@ class BatchApp(tk.Tk):
         self.label(body, '个人数据独立保存，升级和卸载会保留稿件、队列与设置。', 9, color=ui.T.text2).pack(anchor='w', pady=5)
         self.button(body, '打开日志文件夹', self.open_logs).pack(anchor='w', pady=10)
         footer = tk.Frame(window, bg=ui.T.bg)
-        footer.pack(fill='x', padx=18, pady=(0, 16))
+        # Reserve the footer before the expanding notebook. Otherwise Tk can
+        # allocate all available height to the notebook and hide Save at high DPI.
+        footer.pack(side='bottom', fill='x', padx=18, pady=(0, 16))
+        notebook.pack(fill='both', expand=True, padx=16, pady=(16, 8))
         error = tk.StringVar()
         self.label(footer, textvariable=error, size=9, color=ui.T.error, wraplength=600).pack(anchor='w', pady=6)
         def save():
             try:
                 models = cloud.normalize_models({name: value.get() for name, value in model_vars.items()})
+                if not key.get().strip() and not cloud.configured():
+                    raise ValueError('请先填写 API Key，再点击保存设置。')
                 cloud.save_credentials(key.get(), workspace.get(), models=models)
+                cloud.key_value()  # Confirm persisted credentials are readable.
                 key.set('')
                 self._save_settings()
                 self.status_var.set('设置已保存；新任务使用所选模型，已入队任务保持原模型')
                 window.destroy()
+                if window._on_saved is not None:
+                    window._on_saved()
             except (OSError, ValueError, RuntimeError) as exc:
                 error.set(str(exc))
         self.button(footer, '保存设置', save, 'primary').pack(anchor='e')
+        return window
 
     def open_logs(self):
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
