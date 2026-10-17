@@ -11,9 +11,19 @@ from unittest.mock import patch
 
 from src.core import cloud
 from src.services.recognizer import worker
+from src.paths import canonical_data_root
 
 
 class CloudDiagnosticsTests(unittest.TestCase):
+    def test_virtualized_existing_queue_uses_consistent_data_root(self):
+        with tempfile.TemporaryDirectory() as folder:
+            local = Path(folder)
+            data = local / 'BilibiliSubtitleTool'
+            redirected = local / 'Packages' / 'SomeApp_family' / 'LocalCache' / 'Local' / 'BilibiliSubtitleTool'
+            self.assertEqual(canonical_data_root(data, redirected/'queue_state.json'), redirected)
+            self.assertEqual(canonical_data_root(data, local/'outside'/'queue_state.json'), data)
+            self.assertEqual(canonical_data_root(data, local/'Packages'/'anything'/'queue_state.json'), data)
+
     def request_error(self, body, status=400):
         return urllib.error.HTTPError('https://dashscope.aliyuncs.com/api', status, 'bad',
             {'x-request-id': 'header-request-123'}, io.BytesIO(body))

@@ -6,6 +6,24 @@ from pathlib import Path
 APP_ID = 'BilibiliSubtitleTool'
 
 
+def canonical_data_root(data, resolved_queue=None):
+    """Use the existing MSIX redirected data root without weakening ownership checks.
+
+    An existing file can resolve into a package LocalCache while its nominal
+    AppData directory still resolves to the physical directory. Canonicalize
+    the whole root only for this exact Windows AppData redirection shape.
+    """
+    data = Path(data).resolve()
+    redirected = Path(resolved_queue or (data / 'queue_state.json').resolve()).parent
+    try:
+        parts = redirected.relative_to(data.parent / 'Packages').parts
+    except ValueError:
+        return data
+    if len(parts) == 4 and parts[1:] == ('LocalCache', 'Local', APP_ID) and data.name == APP_ID:
+        return redirected
+    return data
+
+
 def application_paths(*, frozen=None, bundle=None, local_app_data=None, override=None):
     frozen = bool(getattr(sys, 'frozen', False)) if frozen is None else frozen
     resources = Path(bundle or getattr(sys, '_MEIPASS', Path(__file__).resolve().parents[1])).resolve()
@@ -16,6 +34,7 @@ def application_paths(*, frozen=None, bundle=None, local_app_data=None, override
             raise ValueError('数据目录必须使用完整路径')
     elif frozen:
         data = Path(local_app_data or os.environ.get('LOCALAPPDATA') or Path.home() / 'AppData' / 'Local') / APP_ID
+        data = canonical_data_root(data)
     else:
         data = resources
     return resources, data.resolve()
